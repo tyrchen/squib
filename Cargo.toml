@@ -4,20 +4,63 @@ resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-authors = ["Your Name <YourName@yourdomain.com>"]
+authors = ["Tyr Chen <tyr.chen@gmail.com>"]
 edition = "2024"
-license = "MIT"
-documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
+license = "Apache-2.0"
+documentation = "https://docs.rs/squib-core"
+repository = "https://github.com/tyrchen/squib"
+homepage = "https://github.com/tyrchen/squib"
 readme = "README.md"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+rust_2024_compatibility = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
 
 [workspace.dependencies]
+# error / async core
 anyhow = "1.0.102"
+thiserror = "2.0.18"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "sync", "fs", "io-util", "time", "signal"] }
+
+# serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.142"
-thiserror = "2.0.18"
-tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros"] }
+
+# observability
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+
+# data
+bytes = "1.10"
+parking_lot = "0.12"
+smallvec = { version = "1.15", features = ["serde", "union"] }
+
+# validation
+validator = { version = "0.20", features = ["derive"] }
+
+# HTTP server (squib-api)
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "tokio"] }
+http = "1.3"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["set-header", "trace", "limit"] }
+
+# raw HTTP parsing for integration tests
+httparse = "1.10"
 
 # workspace crates
 squib-core = { path = "crates/core" }
+squib-api = { path = "crates/api" }

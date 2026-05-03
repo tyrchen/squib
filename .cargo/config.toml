@@ -1,0 +1,9 @@
+# squib targets Apple Silicon only. macOS 15 Sequoia is the minimum supported
+# version (we depend on hv_gic_* for in-kernel GICv3). See
+# docs/research/aarch64-hvf-guest-stack.md §9 for the full rationale.
+
+[env]
+MACOSX_DEPLOYMENT_TARGET = "15.0"
+
+[build]
+target = "aarch64-apple-darwin"

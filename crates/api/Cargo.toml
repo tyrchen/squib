@@ -1,0 +1,31 @@
+[package]
+name = "squib-api"
+description = "Firecracker-compatible HTTP API server for squib (axum on a Unix domain socket)"
+categories = ["virtualization", "web-programming::http-server"]
+keywords = ["firecracker", "microvm", "api", "axum"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+httparse = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

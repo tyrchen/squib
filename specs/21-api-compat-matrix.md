@@ -1,15 +1,19 @@
 ---
-title: squib — Firecracker API Compatibility Matrix
+title: 21-api-compat-matrix — Firecracker API line-by-line bookkeeping
 type: design
 status: draft
 last_updated: 2026-05-03
-depends_on: squib-prd.md, squib-design.md, docs/research/firecracker-api-surface.md
-supersedes: prior dual-backend matrix (2026-05-03 morning)
+depends_on: 00-prd.md, 20-firecracker-api.md
+supersedes: squib-api-compat-design.md
 ---
 
-# squib — Firecracker API Compatibility Matrix
+# 21 · API Compatibility Matrix — line-by-line bookkeeping
 
-The PRD says squib is interface-compatible. This spec is the line-by-line bookkeeping. Every endpoint, field, CLI flag, and behavior in upstream Firecracker is listed here with squib's status.
+Status: draft · Owner: squib-api · Depends on: [00-prd.md](./00-prd.md), [20-firecracker-api.md](./20-firecracker-api.md)
+
+## 1. Purpose
+
+[00-prd.md](./00-prd.md) says squib is interface-compatible. This file is the per-field bookkeeping. Every endpoint, field, CLI flag, and behavior in upstream Firecracker is listed with squib's status. When upstream adds a field, this file gets a new row; when squib's behaviour drifts, this file is the diff target.
 
 Squib has **one backend** (HVF, Apple Silicon, aarch64 guest). There is no `--hypervisor` flag; the matrix is a single column.
 
@@ -195,7 +199,7 @@ All fields F. File or FIFO targets both work; `mkfifo` is supported on macOS.
 | `--describe-snapshot <path>` | F | reads upstream-format files where structurally compatible |
 | **squib-only**: `--network <shared\|bridged\|host\|userspace>` | new | `shared` default |
 
-There is **no** `--hypervisor` flag. The earlier dual-backend draft has been removed; squib has one backend.
+There is **no** `--hypervisor` flag.
 
 ## 4. Static config file (`--config-file`) field map
 
@@ -269,7 +273,8 @@ Common 400 causes squib emits with the documented messages:
 
 ## 10. Test surface
 
-For each row in this matrix, the verification plan defines a parity test:
+For each row in this matrix, [72-testing-strategy.md § 3](./72-testing-strategy.md#3-compat-suite) defines a parity test:
+
 - **F rows**: pass-through replay of the upstream Firecracker integration test cases (suitably aarch64-adjusted).
 - **P rows**: a squib-specific test asserts the documented deviation (e.g. `host_dev_name` mapping to vmnet handle).
 - **A rows**: a test asserts the field is accepted, the warning is emitted, and the VM otherwise boots.
@@ -277,8 +282,8 @@ For each row in this matrix, the verification plan defines a parity test:
 
 CI runs the full matrix against ad-hoc-signed local builds; releases additionally run against notarized builds.
 
-## 11. What's removed from the prior draft
+## 11. Cross-references
 
-The earlier matrix had per-backend columns (VZ vs HVF) and a "Late (L)" status for features deferred past 1.0. Both are gone. Single column. No "Late" — the only timeline status is "1.0" or "stretch" (and stretches are flagged in the PRD, not here).
-
-The earlier matrix had **24 rows in R or P state** for VZ-related limitations (Diff snapshots, dirty tracking, Uffd backend, CPU templates, custom virtio devices, per-queue rate limiters). With HVF as the only backend, **all 24 of those are now F**. That's the substantive change.
+- ← Depends on: [00-prd.md](./00-prd.md), [20-firecracker-api.md](./20-firecracker-api.md)
+- → Consumed by: [50-cli.md](./50-cli.md), [72-testing-strategy.md](./72-testing-strategy.md)
+- ↔ Related research: [docs/research/firecracker-api-surface.md](../docs/research/firecracker-api-surface.md), [docs/research/firecracker-subsystems.md](../docs/research/firecracker-subsystems.md)

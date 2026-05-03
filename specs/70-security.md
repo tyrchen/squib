@@ -1,0 +1,132 @@
+---
+title: 70-security — threat model, unsafe boundaries, validation, secrets
+type: design
+status: draft
+last_updated: 2026-05-03
+depends_on: 00-prd.md, 11-runtime-core.md
+---
+
+# 70 · Security — threat model, unsafe boundaries, validation, secrets
+
+Status: draft · Owner: workspace · Depends on: [00-prd.md](./00-prd.md), [11-runtime-core.md](./11-runtime-core.md)
+
+## 1. Threat model
+
+Squib targets a **developer machine**. The operator is trusted; the threat model is not "an arbitrary tenant attacks the host." With that scoped down, the realistic adversaries are:
+
+- **A misconfigured guest image** that emits malformed virtio frames, oversized MMIO bursts, or pathological ESR_EL2 patterns.
+- **A malicious snapshot file** dropped by an attacker who controls a path on the host filesystem.
+- **A misconfigured launcher** that posts oversized HTTP bodies, deeply nested JSON, or Unicode-pathological identifiers.
+- **A compromised gvproxy upstream** when bundled (we ship a pinned binary; upstream supply-chain still matters).
+- **An unrelated process on the host** that watches `/run/firecracker.socket`. UDS permissions matter.
+
+Out of scope: side-channel attacks across guests, Spectre-class issues already mitigated by Apple Silicon, kernel-level escapes from a compromised host kernel.
+
+## 2. Rust safety
+
+Per CLAUDE.md § Safety & Security:
+
+- `#![forbid(unsafe_code)]` at the crate root of every crate **except** `squib-hv` and `squib-net::sys`.
+- The two unsafe-bearing crates have ~50 and ~300 lines of `unsafe` respectively, each block prefixed with `// SAFETY:` referencing the framework contract it relies on.
+- No transmute between unrelated types, no aliasing `&mut`, no uninitialized reads, no out-of-bounds. `cargo +nightly miri test` runs against the test suite excluding HVF-touching tests.
+- Boundary modules (`squib-api`, `RuntimeApiController`'s action dispatch) lint with `clippy::unwrap_used`, `clippy::expect_used`, `clippy::indexing_slicing`, `clippy::panic`, `clippy::expect_used` denied.
+- Library crates use `thiserror`-derived enum errors; the CLI uses `anyhow` only at `main.rs`.
+
+## 3. Unsafe boundaries
+
+Two, total. Both are documented contracts with Apple frameworks.
+
+### 3.1 `squib-hv`
+
+- All `applevisor` calls (`hv_vm_*`, `hv_vcpu_*`, `hv_gic_*`).
+- Mach exception helpers used by the postcopy pager (in `squib-host` actually; `squib-hv` only does the HVF-side mapping).
+
+Each block carries a `// SAFETY:` comment referencing the relevant Apple Hypervisor Framework documentation section. Code review for any change that adds an `unsafe` block requires explicit sign-off.
+
+### 3.2 `squib-net::sys`
+
+- `vmnet.framework` FFI: `vmnet_start_interface`, `vmnet_read`, `vmnet_write`, `vmnet_stop_interface` against `dispatch_queue`.
+
+~300 lines of `unsafe`, isolated. The safe wrapper above (`squib-net::VmnetIface`) exposes a Rust-typed surface. Per CLAUDE.md § FFI boundaries, never expose `*mut T` to safe callers.
+
+## 4. Input validation
+
+Per CLAUDE.md § Input Validation. Validation runs at deserialization time, not later.
+
+- **Length caps on every string** from external input. Default 256 bytes; raised deliberately per field. `User-Agent`-class amplification attacks (entire HTML in a header field) are real; we cap aggressively.
+- **Range caps on every integer**. `vcpu_count: 1..=hv_max`, `mem_size_mib: 1..=host_ram_minus_overhead`, `http_api_max_payload_size: 1024..=1_048_576`.
+- **Regex allowlists, never blocklists**. Identifiers (`drive_id`, `iface_id`, `id`): `^[A-Za-z0-9_]{1,64}$`. Slugs and free-form short fields use the same pattern.
+- **Bounded collections**. `Vec<DriveConfig>`, `HashMap<...>` from external input have explicit element-count caps.
+- **`#[serde(deny_unknown_fields)]`** on every endpoint struct except the static-config envelope (which carries `"squib": {...}` and must tolerate forward-compat).
+- **Newtypes** for validated values (`DriveId(String)`, `IfaceId(String)`, `MemSizeMib(u64)`) with private fields and fallible constructors. Validation runs once in `new`/`try_from`; downstream is provably safe.
+
+## 5. Path inputs
+
+Per CLAUDE.md § Injection Prevention:
+
+- Reject `..`, absolute paths in fields meant to be relative, NUL bytes, OS-specific separators in identifiers.
+- For `path_on_host` (drives), `kernel_image_path`, `initrd_path`: canonicalize and verify the path actually opens with the expected file-type. Symlinks defeat naïve checks; we re-canonicalize after open where possible.
+- For the chroot in `squib-jail`: re-canonicalize after open.
+
+## 6. Resource limits
+
+Per CLAUDE.md § Resource Limits:
+
+- **HTTP body size**: `--http-api-max-payload-size` (default 51200, range 1024..=1_048_576), enforced by `tower_http::limit::RequestBodyLimitLayer`.
+- **Timeouts**: every network and disk IO operation in the runtime carries a `tokio::time::timeout`. UDS connect timeouts: 5 s. Per-API-action timeouts: 30 s default; snapshot operations bumped to 5 min for big memory files.
+- **Concurrency caps**: bounded mpsc channels between API server and VMM event loop (capacity 1024). Bounded JoinSets for block-IO and per-disk worker threads.
+- **Recursion limits**: `serde_json` default recursion limit halved for untrusted input. `validator`-derived rules kick in at deserialization time so deeply nested JSON is bounded by the field-tree depth, not the parser.
+
+## 7. Cryptography & secrets
+
+Per CLAUDE.md § Cryptography & Secrets:
+
+- **Constant-time comparison** for any token check (V2 IMDS token in MMDS): `subtle::ConstantTimeEq`.
+- **Randomness**: `aws-lc-rs::rand::SystemRandom` for IDs / nonces / virtio-rng output. Never `thread_rng()`.
+- **No password hashing in 1.0** (no auth surface; UDS permissions are the boundary).
+- **No secrets in logs**: MMDS data is never logged at info or below; the tracing layer redacts it. Custom `Debug` impls on request types redact the `Authorization` header field if present (defense-in-depth — there is no `Authorization` field in the upstream API, but we redact pre-emptively for forward compat).
+- **Secret loading**: env / secret-manager only; never hard-code, never bake into binaries.
+- **TLS**: not used in 1.0 (UDS only). When added, `rustls` with `aws-lc-rs` backend.
+
+## 8. UDS permissions
+
+`/run/firecracker.socket` is created with mode `0600`, owned by the invoking user. The launcher is responsible for adjusting permissions if it wants to share the socket with another uid. Squib does not chmod the socket up.
+
+## 9. Code-signing & entitlements
+
+Per [00-prd.md § R11](./00-prd.md#8-hard-requirements-10):
+
+- Binary signed with `com.apple.security.hypervisor` (open) and `com.apple.vm.networking` (open / restricted as appropriate).
+- Hardened runtime flag (`--options runtime`) on every signed binary.
+- CI runs against an ad-hoc-signed local build; releases are notarized.
+- `MACOSX_DEPLOYMENT_TARGET=15.0` pinned in `.cargo/config.toml`.
+
+## 10. Supply chain
+
+- `cargo audit` on every CI run.
+- `cargo deny check` on every CI run, enforcing license allowlist (Apache-2.0, MIT, BSD; LGPL banned) and the dependency-ban list (`vmm-sys-util`, `kvm-*`, `vhost-*`, `seccompiler`, `openssl`, `native-tls`).
+- Vendored bundled binaries (gvproxy) are pinned to a SHA-256 in `vendors/`; upgrade requires a deliberate PR with a fresh hash.
+- Pre-commit hook scans for `.env*`, `credentials*`, `*.pem`, etc. — secret-scanning before commits leave the laptop.
+
+## 11. Boundary panics
+
+Reachable panics from external input are denied at lint level. The `RuntimeApiController` and `squib-api` handler modules carry `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]`. A vCPU thread panic transitions the VM to `Shutdown` but does not bring down the process; see [11-runtime-core.md § 5](./11-runtime-core.md#5-panic-policy).
+
+## 12. Invariants
+
+| # | Invariant | Pinned by |
+|---|-----------|-----------|
+| I-SEC-1 | `unsafe` lives only in `squib-hv` and `squib-net::sys`. | CI grep + `#![forbid(unsafe_code)]` everywhere else |
+| I-SEC-2 | Every external string field has a length cap and a regex / charset allowlist. | Per-field `validator` rules; compat suite asserts oversized inputs return 4xx |
+| I-SEC-3 | Every external integer has a range cap. | Per-field `validator` rules |
+| I-SEC-4 | No `panic!`, `unwrap`, `expect`, `[]`-indexing, `unreachable!`, `todo!` reachable from API input. | Lint denied in boundary modules |
+| I-SEC-5 | The MMDS JSON tree never appears in logs at `info` or below. | Tracing-layer redaction unit test |
+| I-SEC-6 | UDS is created `0600`, owned by the invoking user. | Integration test |
+| I-SEC-7 | Releases are notarized; CI verifies stapled tickets. | `make notarize` + CI step |
+| I-SEC-8 | `cargo audit` and `cargo deny check` are gating. | CI step |
+
+## 13. Cross-references
+
+- ← Depends on: [00-prd.md](./00-prd.md), [11-runtime-core.md](./11-runtime-core.md)
+- → Consumed by: every component design (each invokes this for its boundary discipline)
+- ↔ Related research: [docs/research/firecracker-architecture.md § Security](../docs/research/firecracker-architecture.md)

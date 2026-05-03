@@ -51,14 +51,18 @@ Each block carries a `// SAFETY:` comment referencing the relevant Apple Hypervi
 
 ## 4. Input validation
 
-Per CLAUDE.md § Input Validation. Validation runs at deserialization time, not later.
+Per CLAUDE.md § Input Validation. The mechanism — `#[serde(try_from = "RawT")]` newtypes that run validation **inside** `TryFrom::try_from` — is pinned in [10-data-model.md § 2.3](./10-data-model.md#23-schema-layer). The point: validation is the only path from JSON to a domain type, and the type system makes "unvalidated `DriveConfig`" unrepresentable. Calling `.validate()` after the fact is not the contract; the constructor *is* the contract.
 
-- **Length caps on every string** from external input. Default 256 bytes; raised deliberately per field. `User-Agent`-class amplification attacks (entire HTML in a header field) are real; we cap aggressively.
-- **Range caps on every integer**. `vcpu_count: 1..=hv_max`, `mem_size_mib: 1..=host_ram_minus_overhead`, `http_api_max_payload_size: 1024..=1_048_576`.
+What that buys us:
+
+- **Length caps on every string** from external input. Default 256 **bytes** (not chars; multi-byte exhaustion is a real attack). Raised deliberately per field. `User-Agent`-class amplification attacks (entire HTML in a header field) are real; we cap aggressively.
+- **Range caps on every integer**. `vcpu_count: 1..=32` (matches upstream `MAX_SUPPORTED_VCPUS`), `mem_size_mib: 1..=host_ram_minus_overhead`, `http_api_max_payload_size: 1024..=1_048_576`.
 - **Regex allowlists, never blocklists**. Identifiers (`drive_id`, `iface_id`, `id`): `^[A-Za-z0-9_]{1,64}$`. Slugs and free-form short fields use the same pattern.
-- **Bounded collections**. `Vec<DriveConfig>`, `HashMap<...>` from external input have explicit element-count caps.
-- **`#[serde(deny_unknown_fields)]`** on every endpoint struct except the static-config envelope (which carries `"squib": {...}` and must tolerate forward-compat).
-- **Newtypes** for validated values (`DriveId(String)`, `IfaceId(String)`, `MemSizeMib(u64)`) with private fields and fallible constructors. Validation runs once in `new`/`try_from`; downstream is provably safe.
+- **Bounded collections**. `Vec<DriveConfig>`, `HashMap<...>` from external input have explicit element-count caps (e.g. `drives: max 8`, `network_interfaces: max 8`).
+- **`#[serde(deny_unknown_fields)]`** on every endpoint struct *and* on the `"squib"` extension sub-object. The single exception is the **top-level** static-config envelope, which must tolerate `"squib": {...}` for forward-compat with future squib extension keys; the `"squib"` sub-object is itself `deny_unknown_fields` so a typo inside it still 400s.
+- **Newtypes** for validated values (`DriveId(String)`, `IfaceId(String)`, `MemSizeMib(u64)`, `SafePath(PathBuf)`) with private fields and fallible constructors. The constructor is the only public entry point; downstream code is provably safe by construction.
+
+The `validator` crate is a useful annotation surface (`#[validate(length(max = 256), regex = "...")]` on the `Raw*` shape) but its `.validate()` call lives **inside** `TryFrom::try_from`, not as a post-deserialization afterthought a handler might forget.
 
 ## 5. Path inputs
 
@@ -96,7 +100,7 @@ Per CLAUDE.md § Cryptography & Secrets:
 
 Per [00-prd.md § R11](./00-prd.md#8-hard-requirements-10):
 
-- Binary signed with `com.apple.security.hypervisor` (open) and `com.apple.vm.networking` (open / restricted as appropriate).
+- Default binary signed with `com.apple.security.hypervisor` (self-claimable). The bridged-enabled build additionally embeds `com.apple.vm.networking` (restricted; requires Apple DTS approval) — shipped as a separately-signed binary, gated by the `bridged` cargo feature in `squib-net`. NAT (`--network=shared`) and host-only modes do **not** require `com.apple.vm.networking`; see [99-key-decisions.md § D17](./99-key-decisions.md#d17-vmnet-entitlement-clarification).
 - Hardened runtime flag (`--options runtime`) on every signed binary.
 - CI runs against an ad-hoc-signed local build; releases are notarized.
 - `MACOSX_DEPLOYMENT_TARGET=15.0` pinned in `.cargo/config.toml`.

@@ -78,7 +78,7 @@ Squib must accept and produce the same wire surface as Firecracker. Day-1 commit
 4. **MMDS** — link-local 169.254.169.254, V1 and V2 (IMDSv2 token), JSON Pointer traversal.
 5. **vsock** — UDS-multiplex protocol exact: host-initiated `CONNECT <port>\n` → `OK <port>\n`, guest-initiated `<uds_path>_<port>` listener.
 6. **Logger / Metrics** — same JSON metric field names, same rate-limited log-line format, file or FIFO targets.
-7. **Snapshot file format** — same magic-id (`0x07101984_AAAA_0000` aarch64), same outer container shape, same memory-file layout (full + sparse-of-dirty). State blob contents are HVF-shaped (different sysreg subset), explicitly documented as squib-1.0 not cross-VMM-compatible.
+7. **Snapshot file format** — bit-identical outer envelope to upstream Firecracker: `bitcode::serialize(Snapshot{header: SnapshotHdr{magic, version: semver::Version}, data: MicrovmState})` followed by an 8-byte LE CRC-64 ISO 3309. Magic `0x07101984_AAAA_0000` (aarch64) lives **inside** the bitcode envelope, not as a raw byte prefix. Memory file layout (full + sparse-of-dirty) matches upstream. `MicrovmState` *contents* are HVF-shaped (different sysreg subset, different GIC-state blob), explicitly documented as squib-1.0 not cross-VMM-compatible. See [10-data-model.md § 6.1](./10-data-model.md#61-state-file-idsnap) and [99-key-decisions.md § D5](./99-key-decisions.md#d5-snapshot-encoding-bitcode-encoded-snapshotmicrovmstate-not-raw-byte-prefixes).
 8. **Boot source** — `kernel_image_path`, `initrd_path`, `boot_args` honored. Linux raw `Image`, `Image.gz`, PE-formatted Image — all decompressed/loaded at config-load time.
 9. **Dirty page tracking** — `track_dirty_pages: true` honored via `hv_vm_protect` write-protect-and-fault scheme; Diff snapshots work.
 10. **PSCI SMP** — multi-vCPU guests boot via PSCI on HVC; CPU_ON / CPU_OFF / SYSTEM_OFF / SYSTEM_RESET implemented.
@@ -117,11 +117,11 @@ The principle: never break a launcher. Reject only when the configuration would 
 - **R8. Stability.** No crashes from external misuse — every error path returns a 4xx with a `fault_message`. `cargo clippy -- -D warnings` clean. `#![forbid(unsafe_code)]` outside `squib-hv` and `squib-net::sys`.
 - **R9. macOS 15 Sequoia or later.** Pinned floor, justified by reliance on `hv_gic_*` for in-kernel GICv3 (avoiding ~3K LoC of userspace GIC emulation).
 - **R10. Apple Silicon arm64 native.** No Rosetta translation, no x86_64 build target. `aarch64-apple-darwin` only.
-- **R11. Code-signed and entitlement-bearing.** Binary ships with `com.apple.security.hypervisor` and `com.apple.vm.networking` entitlements; CI runs against an ad-hoc-signed local build, releases are notarized.
+- **R11. Code-signed and entitlement-bearing.** Default binary ships with `com.apple.security.hypervisor` only (sufficient for HVF, vmnet shared-mode NAT, vmnet host-only, and gvproxy userspace mode). A separately-signed bridged-enabled build embeds `com.apple.vm.networking` (restricted; gated on Apple DTS approval). See [99-key-decisions.md § D17](./99-key-decisions.md#d17-vmnet-entitlement-clarification). CI runs against an ad-hoc-signed local build; releases are notarized.
 
 ## 9. Soft requirements
 
-- **S1. Userspace networking fallback.** A `--network=userspace` mode bundling `gvproxy` so users with no `com.apple.vm.networking` entitlement and no admin rights still get NAT. Stretch in 1.0.
+- **S1. Userspace networking fallback.** A `--network=userspace` mode bundling `gvproxy` for users who cannot run vmnet at all (e.g. heavily locked-down corporate machines that strip `com.apple.security.hypervisor`-permitted vmnet calls, or users who want a fully userspace TCP/IP path). Note: NAT via `--network=shared` does **not** require any extra entitlement beyond `com.apple.security.hypervisor` (D17), so userspace mode is genuinely a fallback rather than a default. Stretch in 1.0.
 - **S2. Compat coverage report.** Each row in [21-api-compat-matrix.md](./21-api-compat-matrix.md) has a passing test or a documented skip. Generated and published with each release.
 - **S3. Single static binary.** `squib` and `squib-jail` ship as code-signed `aarch64-apple-darwin` binaries with embedded entitlements.
 - **S4. Homebrew formula.** Available alongside direct `.pkg` download.

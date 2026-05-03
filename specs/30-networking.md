@@ -16,12 +16,14 @@ Provide host-side networking for virtio-net via Apple `vmnet.framework`, with a 
 
 ## 2. Modes
 
-| Mode | Entitlement | Notes |
-|------|-------------|-------|
-| `--network=shared` (default) | `com.apple.vm.networking` (open / self-claimable) | NAT through host |
-| `--network=bridged` | `com.apple.vm.networking` (restricted) | gated on Apple DTS request; ships disabled by default |
-| `--network=host` | `com.apple.vm.networking` | host-only |
+| Mode | Entitlement (beyond `com.apple.security.hypervisor`) | Notes |
+|------|-------------------------------------------------------|-------|
+| `--network=shared` (default) | **none** | NAT through host via `VMNET_SHARED_MODE` |
+| `--network=host` | **none** | host-only via `VMNET_HOST_MODE` |
+| `--network=bridged` | `com.apple.vm.networking` (restricted) | bridged via `VMNET_BRIDGED_MODE`; gated on Apple DTS approval; ships disabled by default |
 | `--network=userspace` | none | bundled `gvproxy` child process; no entitlement, slightly slower |
+
+Per Apple's `vmnet.framework` documentation and the project research memo (`docs/research/macos-hypervisor-ecosystem.md` § 5.1): only `VMNET_BRIDGED_MODE` requires the restricted `com.apple.vm.networking` entitlement. NAT (`shared`) and host-only modes work with just `com.apple.security.hypervisor` (which any HVF-using binary already carries). This corrects an earlier draft of this spec that conflated the entitlement requirements; recorded as [99-key-decisions.md § D17](./99-key-decisions.md#d17-vmnet-entitlement-clarification).
 
 The `host_dev_name` field in `PUT /network-interfaces/{id}` is mapped deterministically to a vmnet handle named `squib-tap-<iface_id>`. Literal Linux TAP names are accepted as opaque labels — the field is preserved for snapshot round-trip but the bytes do not influence host setup.
 

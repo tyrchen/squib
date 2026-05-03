@@ -39,7 +39,7 @@ From [docs/research/aarch64-hvf-guest-stack.md § 11](../docs/research/aarch64-h
   ..ram_end                            RAM end
 ```
 
-Bounds: `0x8000_0000 ≤ ram_end < 0x00FF_8000_0000` (max 1022 GiB). DRAM base matches Firecracker's aarch64 layout for API parity. MMIO base matches QEMU virt / libkrun for kernel-config familiarity.
+Bounds: `0x8000_0000 ≤ ram_end < 0x00FF_8000_0000` (max 1022 GiB; matches upstream `DRAM_MEM_MAX_SIZE`). DRAM base matches Firecracker's aarch64 layout for API parity. MMIO base matches QEMU virt / libkrun for kernel-config familiarity, **not** Firecracker's MMIO base — the consequence is that a Firecracker-tuned kernel that hard-codes MMIO addresses (rather than reading them from FDT) may not boot on squib. The standard FDT-driven discovery path used by mainline Linux kernels works regardless. Documented as a row in [21-api-compat-matrix.md § 7](./21-api-compat-matrix.md#7-snapshot-file-format) and surfaced with a one-line warning in `docs/api-deviations.md`.
 
 ## 3. Sysreg subset
 
@@ -184,7 +184,7 @@ For PSCI `CPU_ON` of a secondary vCPU, the dispatch sets the same register tripl
 | I-AB-2 | The PSCI dispatch table returns NOT_SUPPORTED for unknown function IDs (never panics, never UB). | `rstest` over the documented function-ID space |
 | I-AB-3 | The kernel loader auto-detects compression via magic bytes and rejects unknown magics with `Error::Config`. | Integration test with a malformed `kernel_image_path` |
 | I-AB-4 | `set_boot_regs` writes exactly four registers (PC, X0, X1, PSTATE — X2/X3 are zeroed by HVF reset). | Snapshot test against a known-good guest |
-| I-AB-5 | The FDT fits in 2 MiB for any supported `vcpu_count` and `mmio_devices.len()`. | Property test up to `vcpu_count = 256, mmio_devices = 32` |
+| I-AB-5 | The FDT fits in 2 MiB for any supported `vcpu_count` and `mmio_devices.len()`. | Property test up to `vcpu_count = 32` (upstream `MAX_SUPPORTED_VCPUS`), `mmio_devices = 32` |
 
 ## 11. Cross-references
 

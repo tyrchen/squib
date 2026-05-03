@@ -66,17 +66,18 @@ Each decision is permanent; supersede with a new D-id rather than editing in pla
 
 ---
 
-## D5 — Snapshot encoding: bitcode, not versionize
+## D5 — Snapshot encoding: bitcode-encoded `Snapshot<MicrovmState>`, not raw byte prefixes
 
 - **Context**: serialization format for the snapshot state file.
 - **Alternatives considered**:
   - `versionize` (upstream Firecracker pre-1.10).
   - `bitcode + serde` (upstream Firecracker post-1.10).
   - Custom CBOR-flavoured.
-- **Decision**: `bitcode + serde`, matching upstream Firecracker post-1.10.
-- **Why**: same wire encoding as upstream means `--describe-snapshot` against an upstream-produced state file works structurally; simpler than maintaining a versionize dialect.
-- **Pinned by**: [10-data-model.md § 6.1](./10-data-model.md#61-state-file-idsnap), [16-snapshots.md § 2](./16-snapshots.md#2-state-file).
-- **Date**: 2026-05-03
+  - Raw `magic | version-string | bitcode-blob | crc64` byte prefix (an earlier squib draft).
+- **Decision**: bitcode-encoded `Snapshot<Data> { header: SnapshotHdr { magic: u64, version: semver::Version }, data: MicrovmState }` followed by an 8-byte LE CRC-64 (ISO 3309) — bit-identical to upstream Firecracker's `vendors/firecracker/src/vmm/src/snapshot/mod.rs`.
+- **Why**: only this layout is byte-compatible with `firecracker --describe-snapshot`. An earlier squib draft put magic and version as raw byte prefixes outside the bitcode envelope; that fails to deserialize against upstream's reader and silently breaks the "structural compatibility" claim. Inside the envelope is the only place these fields can live and still be readable by upstream tooling.
+- **Pinned by**: [10-data-model.md § 6.1](./10-data-model.md#61-state-file-idsnap), [16-snapshots.md § 2](./16-snapshots.md#2-state-file), [21-api-compat-matrix.md § 7](./21-api-compat-matrix.md#7-snapshot-file-format).
+- **Date**: 2026-05-03 (drafted), 2026-05-03 (corrected to upstream-compatible envelope)
 
 ---
 
@@ -147,30 +148,31 @@ Each decision is permanent; supersede with a new D-id rather than editing in pla
 
 ---
 
-## D11 — Dirty tracking: 2 MiB default with 4 KiB fallback
+## D11 — Dirty tracking: 2 MiB default with host-page fallback
 
 - **Context**: granularity of `hv_vm_protect`-based dirty bitmap.
 - **Alternatives considered**:
-  - 4 KiB everywhere (precise; high TLB-shootdown cost).
+  - host-page (16 KiB on Apple Silicon) everywhere (precise; high TLB-shootdown cost).
   - 2 MiB everywhere (cheap; over-counts dirty bytes).
-  - 2 MiB default + adaptive 4 KiB for hot regions.
-- **Decision**: 2 MiB default; the tracker's heuristic drops to 4 KiB only for hot regions (per-region dirty rate above threshold).
-- **Why**: TLB shootdown is the real performance limiter. 2 MiB granularity bounds the cost; 4 KiB is necessary only when the over-count meaningfully bloats the Diff snapshot.
-- **Pinned by**: [16-snapshots.md § 4](./16-snapshots.md#4-dirty-page-tracking), [71-performance-budgets.md § 6.1](./71-performance-budgets.md#61-diff-snapshot-save).
+  - 2 MiB default + adaptive host-page for hot regions.
+- **Decision**: 2 MiB default; the tracker's heuristic drops to **host-page granularity** (16 KiB on Apple Silicon — see [D21](#d21-apple-silicon-host-page-is-16-kib-tracking-page-is-a-separate-concept)) only for hot regions (per-region dirty rate above threshold). Earlier draft phrasing "4 KiB fallback" is corrected; 4 KiB is fictional on Apple Silicon hosts.
+- **Why**: TLB shootdown is the real performance limiter. 2 MiB granularity bounds the cost; host-page granularity is necessary only when the over-count meaningfully bloats the Diff snapshot.
+- **Pinned by**: [16-snapshots.md § 4](./16-snapshots.md#4-dirty-page-tracking), [71-performance-budgets.md § 6.1](./71-performance-budgets.md#61-diff-snapshot-save), [99-key-decisions.md § D21](#d21-apple-silicon-host-page-is-16-kib-tracking-page-is-a-separate-concept).
 - **Date**: 2026-05-03
 
 ---
 
-## D12 — OpenAPI served behind a flag
+## D12 — OpenAPI as a squib extension, off by default
 
 - **Context**: should `GET /openapi.json` always be available?
 - **Alternatives considered**:
   - Always-on.
-  - Behind an explicit `--openapi` flag.
-- **Decision**: behind `--openapi`, off by default to match upstream Firecracker behaviour.
-- **Why**: upstream does not serve OpenAPI by default; matching that posture preserves the wire surface for compat-suite parity. Power users opt in.
+  - Behind an explicit `--openapi` flag, off by default.
+  - Not served at all (closer match to upstream).
+- **Decision**: behind `--openapi`, **off by default**. The endpoint is a squib-only ergonomics extension, not a "match upstream" feature.
+- **Why**: upstream Firecracker does not serve OpenAPI under any conditions — it ships the YAML in the source tree only. Defaulting to off keeps the wire surface byte-identical to upstream for compat-suite parity. Defaulting to on would manufacture a new surface every wire-fuzzing harness has to special-case. Power users opt in via `--openapi`; the cost to them is one CLI flag.
 - **Pinned by**: [20-firecracker-api.md § 7](./20-firecracker-api.md#7-openapi-document), [50-cli.md § 2](./50-cli.md#2-parser).
-- **Date**: 2026-05-03
+- **Date**: 2026-05-03 (drafted), 2026-05-03 (rationale corrected — "match upstream" was misleading; upstream has no flag at all)
 
 ---
 
@@ -222,6 +224,73 @@ Each decision is permanent; supersede with a new D-id rather than editing in pla
 - **Decision**: single-VM per process for 1.0. The launcher pattern (one squib per VM) matches upstream Firecracker.
 - **Why**: matches upstream API exactly; isolates VM crashes (a vCPU panic is fatal to the VM but the process ends, freeing all resources cleanly). Multi-VM would diverge from the upstream contract.
 - **Pinned by**: [00-prd.md § 4](./00-prd.md#4-non-goals), [11-runtime-core.md § 5](./11-runtime-core.md#5-panic-policy).
+- **Date**: 2026-05-03
+
+---
+
+## D17 — vmnet entitlement clarification
+
+- **Context**: which `--network` modes require which Apple entitlement?
+- **Alternatives considered**:
+  - State that all `--network` modes need `com.apple.vm.networking` (an earlier squib draft).
+  - State that only `bridged` needs it; `shared` and `host` work with just `com.apple.security.hypervisor`.
+- **Decision**: only `--network=bridged` requires the (restricted) `com.apple.vm.networking` entitlement. `--network=shared` (NAT) and `--network=host` need only `com.apple.security.hypervisor`, which any HVF-using binary already carries. `--network=userspace` (gvproxy) needs no extra entitlement.
+- **Why**: per Apple's `vmnet.framework` docs and the project's own research memo (`docs/research/macos-hypervisor-ecosystem.md` § 5.1: "NAT/host-only modes do not need it"), only `VMNET_BRIDGED_MODE` requires the restricted entitlement. The earlier draft conflated the two and would have driven adopters toward the gvproxy fallback unnecessarily, on the false belief that NAT needs an Apple-restricted entitlement.
+- **Pinned by**: [30-networking.md § 2](./30-networking.md#2-modes), [00-prd.md § 13 Risks](./00-prd.md#13-risks).
+- **Date**: 2026-05-03
+
+---
+
+## D18 — vCPU thread affinity: runtime check now, typestate later
+
+- **Context**: HVF requires every `hv_vcpu_*` call (except `hv_vcpus_exit`) to come from the OS thread that called `hv_vcpu_create`. How do we enforce this in Rust?
+- **Alternatives considered**:
+  - Make `HvfVcpu: !Send` so the type system forbids any cross-thread move.
+  - Make `HvfVcpu: Send` and check `std::thread::current().id()` at every call site (runtime check, surfaces as `Error::Threading`).
+  - Typestate split: `VcpuHandle: Send` (no I/O methods) → `VcpuOnThread<'_>: !Send` (full surface, returned by a one-shot `bind()` that consumes the handle).
+- **Decision**: runtime check ships in 1.0 (`HvfVcpu: Send` + thread-local id check). Typestate refinement is a follow-up; revisit when the API churn cost is justified.
+- **Why**: the runtime check is one line per public method and zero API impact; the typestate is correct-by-construction but requires a `bind()` ceremony every consumer threads through. Phase 1 needs to ship a vCPU run loop, not perfect a type encoding. The hard rule (per [11-runtime-core.md § 4](./11-runtime-core.md#4-threading-model)) is enforced and unit-tested either way; the difference is debug-time UX.
+- **Pinned by**: [11-runtime-core.md § 4](./11-runtime-core.md#4-threading-model), [12-hvf-backend.md § 4](./12-hvf-backend.md#4-threading-rules).
+- **Date**: 2026-05-03
+
+---
+
+## D19 — `vcpu_count` capped at 32 (upstream `MAX_SUPPORTED_VCPUS`)
+
+- **Context**: the upper bound for `machine-config.vcpu_count`.
+- **Alternatives considered**:
+  - Squib-determined cap based on `hv_vm_get_max_vcpu_count()` (potentially > 32).
+  - Cap at upstream Firecracker's `MAX_SUPPORTED_VCPUS = 32`.
+- **Decision**: cap at `min(32, host_physical_cores, hv_vm_get_max_vcpu_count())`. Hard wire-shape ceiling is 32.
+- **Why**: a launcher that asks for `vcpu_count: 33` succeeds against squib but fails against upstream Firecracker — that is a wire deviation we explicitly reject under [00-prd.md § 6](./00-prd.md#6-compatibility-scope-the-contract). Apple Silicon hosts cap below 32 anyway; the rule "never accept what we cannot run, never accept what upstream rejects" gives us 32 as the only correct ceiling. The earlier draft's "1..=hv_vm_get_max_vcpu_count()" and the property test up to `vcpu_count = 256` are both corrected.
+- **Pinned by**: [10-data-model.md § 2.3](./10-data-model.md#23-schema-layer), [13-arch-and-boot.md § 10](./13-arch-and-boot.md#10-invariants), [21-api-compat-matrix.md § 2 /machine-config](./21-api-compat-matrix.md#machine-config), [70-security.md § 4](./70-security.md#4-input-validation).
+- **Date**: 2026-05-03
+
+---
+
+## D20 — API server read-only fast path (liveness during long actions)
+
+- **Context**: a single VMM event loop serializing all `ApiAction`s makes liveness probes (`GET /`, `GET /version`, `GET /vm/config`) queue behind a multi-second `PUT /snapshot/load` against a 4 GiB memory file. Orchestrators time out and incorrectly conclude squib is dead.
+- **Alternatives considered**:
+  - Single channel for all requests (the naive design — fails the use case above).
+  - Async/streaming progress responses for long actions (deviates from upstream's blocking 204 contract; rejected on compat grounds).
+  - Read-only fast path: GET handlers read from an `ArcSwap`-backed mirror, never touch the channel; mutating handlers serialize through the channel as before.
+- **Decision**: read-only fast path. `RuntimeApiController.snapshot: ArcSwap<ControllerSnapshot>` is updated by the VMM event loop on every transition; GET handlers `load()` and return without round-tripping the channel.
+- **Why**: liveness during long actions is a correctness property, not a perf nice-to-have — orchestrators rely on `GET /` returning under their poll timeout. `ArcSwap` is the mechanism CLAUDE.md recommends for "infrequently updated shared data," and the mirror is exactly that. The implementation cost is one extra struct and an `Arc::clone` on every GET; trivially affordable.
+- **Pinned by**: [20-firecracker-api.md § 5](./20-firecracker-api.md#5-channel-to-vmm-and-the-read-only-fast-path), [20-firecracker-api.md § 9 I-API-7](./20-firecracker-api.md#9-invariants).
+- **Date**: 2026-05-03
+
+---
+
+## D21 — Apple Silicon host page is 16 KiB; tracking page is a separate concept
+
+- **Context**: dirty-page tracking math depends on the host page size. Linux-derived prior art assumes 4 KiB; Apple Silicon hosts are 16 KiB.
+- **Alternatives considered**:
+  - Hard-code `4 KiB` everywhere and live with the rounding HVF imposes.
+  - Define three separate constants (`HOST_PAGE_SIZE`, `HVF_STAGE2_GRANULE`, `TRACKING_PAGE_SIZE`) and use the right one at each site.
+- **Decision**: three separate constants, centralized in `squib-arch::layout::PageGeometry`. `HOST_PAGE_SIZE = 16 KiB` on Apple Silicon. `HVF_STAGE2_GRANULE = 16 KiB`. `TRACKING_PAGE_SIZE = 2 MiB` default, with adaptive step-down to 16 KiB (not 4 KiB) for hot regions.
+- **Why**: any granule strictly smaller than the host page is a fiction — `hv_vm_protect` rounds up. Separating the three sizes means the dirty bitmap math, the FAR-to-bit-index calculation, and the snapshot writer share one source of truth and never silently disagree. Refines D11 (which originally said "4 KiB fallback").
+- **Pinned by**: [16-snapshots.md § 4.1](./16-snapshots.md#41-granularity-host-page-vs-tracking-page-vs-hvf-stage-2-granule), [99-key-decisions.md § D11](#d11-dirty-tracking-2-mib-default-with-host-page-fallback) (companion).
 - **Date**: 2026-05-03
 
 ---

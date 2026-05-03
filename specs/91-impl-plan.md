@@ -25,11 +25,14 @@ What is ready, what isn't, and what blocks Phase 1 today.
 **Pending Phase 0 follow-ups before Phase 1 kicks off:**
 - Drop `BackendKind::Vz` from `squib-core::backend` (HVF-only now per [99-key-decisions.md § D1](./99-key-decisions.md#d1-hvf-only-no-vz)).
 - Drop `--hypervisor` from CLI (one backend).
-- `squib.entitlements` plist with `com.apple.security.hypervisor` + `com.apple.vm.networking`; `make sign` Makefile target.
-- `MACOSX_DEPLOYMENT_TARGET=15.0` in `.cargo/config.toml`.
+- `squib.entitlements` plist with `com.apple.security.hypervisor` only by default (D17 — `com.apple.vm.networking` is added only for the bridged-enabled separately-signed build); `make sign` Makefile target.
+- `MACOSX_DEPLOYMENT_TARGET=15.0` in `.cargo/config.toml`. Confirm `applevisor = "1.0"` is consumed with `features = ["macos-15-0"]` (D2/D18 — earlier draft used `macos-26-0`, which would have produced runtime symbol errors on macOS 15).
+- `InstanceState` wire enum: collapse to upstream three values (`"Not started"` / `"Running"` / `"Paused"`) via `LifecyclePhase::wire_state`. Internal richer phases stay; the wire shape narrows. ([10-data-model.md § 2.2](./10-data-model.md#22-instanceinfo--get-).)
+- `vcpu_count` validation upper bound = 32 (upstream `MAX_SUPPORTED_VCPUS`), not `hv_vm_get_max_vcpu_count()` (D19).
+- Snapshot envelope = upstream `Snapshot<MicrovmState>` shape (D5 corrected) — get this right before Phase 5 starts, otherwise Phase 5 has to re-do the format.
 
 **Open spikes (research-skill territory if ever):**
-- None today; every load-bearing assumption has a memo in `docs/research/`.
+- None today; every load-bearing assumption has a memo in `docs/research/` or a D-record in [99-key-decisions.md](./99-key-decisions.md).
 
 ## 1. Why dependency order ≠ feature order
 
@@ -209,7 +212,7 @@ A nightly cron CI lane catches unannounced upstream additions.
 | 2 | API schema drift between manually-typed structs and `firecracker.yaml` | Round-trip property test: parse-then-serialize swagger examples and assert byte-equality |
 | 3 | virtio-vsock TSI port from libkrun is gnarly | Keep TSI off by default per [99-key-decisions.md § D8](./99-key-decisions.md#d8-tsi-vsock-off-by-default); ship plain virtio-vsock first |
 | 4 | `com.apple.vm.networking` denial blocks bridged users | Already mitigated by gvproxy fallback; document expectations early |
-| 5 | `hv_vm_protect` TLB cost under high dirty rate | 2 MiB granularity default + adaptive heuristic per [99-key-decisions.md § D11](./99-key-decisions.md#d11-dirty-tracking-2mib-default-with-4kib-fallback) |
+| 5 | `hv_vm_protect` TLB cost under high dirty rate | 2 MiB granularity default + adaptive heuristic per [99-key-decisions.md § D11](./99-key-decisions.md#d11-dirty-tracking-2-mib-default-with-host-page-fallback) |
 | 5 | Mach exception port edge cases break LLDB | Save and forward to prior handlers; LLDB-attach test in CI |
 | 6 | Notarytool stalls release | Notarize post-merge async, decoupled from tag |
 | 7 | Boot time misses 400 ms | Hand-tuned kernel config + minimal initramfs in `examples/` |

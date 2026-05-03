@@ -99,6 +99,8 @@ Ported from `vendors/libkrun/src/devices/src/virtio/vsock/`. Two modes:
 - **Plain mode** (default): UDS multiplex protocol bit-identical to upstream Firecracker. Host-initiated `CONNECT <port>\n` → `OK <port>\n`; guest-initiated `<uds_path>_<port>` listener.
 - **TSI mode** (opt-in via `"squib": { "vsock_tsi": true }`): guest opens AF_VSOCK sockets and we transparently proxy to host AF_INET / AF_UNIX. Useful for Lambda-shaped guests. Off by default — TSI changes vsock semantics in a non-Firecracker-compatible way. See [99-key-decisions.md § D8](./99-key-decisions.md#d8-tsi-vsock-off-by-default).
 
+> **Guest kernel requirement.** TSI is a libkrun extension that requires a *cooperating guest kernel* — the AF_VSOCK socket bytes have to land in libkrun's TSI dispatcher, which only happens with libkrun's guest kernel patches. A stock upstream Linux kernel with `vsock_tsi: true` enabled on the host does **not** transparently get host AF_INET; instead the AF_VSOCK sockets behave as plain vsock and the user sees no benefit. squib emits a startup warning when `vsock_tsi: true` is configured to make this expectation visible. Document in `docs/macos-setup.md`.
+
 ### 4.4 virtio-balloon
 
 Ported from cloud-hypervisor. Inflate / deflate via the standard virtio-balloon protocol. Free-page hinting and free-page reporting both implemented; reporting uses `madvise(MADV_DONTNEED)` to actually return memory to the OS on macOS.

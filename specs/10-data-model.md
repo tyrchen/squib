@@ -40,25 +40,91 @@ Per upstream Firecracker, snake_case field name. No additional fields, ever. Hea
 ### 2.2 InstanceInfo — `GET /`
 
 ```rust
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Debug)]
 pub struct InstanceInfo {
     pub id: String,                    // user-supplied --id, default "anonymous-instance"
-    pub state: InstanceState,          // Uninitialized | Starting | Running | Paused | NotStarted
+    pub state: VmState,                // wire shape — three values, see below
     pub vmm_version: String,           // "1.16-firecracker-compat (squib X.Y.Z)"
     pub app_name: String,              // "Firecracker" — sniffed by SDKs
 }
+
+/// Wire-shape enum for `InstanceInfo.state`. Mirrors upstream
+/// `vmm/src/vmm_config/instance_info.rs::VmState` exactly: three variants,
+/// `NotStarted` serializes as the literal string `"Not started"` (with a
+/// space and lowercase 's').
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum VmState {
+    #[default] NotStarted,
+    Paused,
+    Running,
+}
+
+impl Display for VmState {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Self::NotStarted => write!(f, "Not started"),
+            Self::Paused     => write!(f, "Paused"),
+            Self::Running    => write!(f, "Running"),
+        }
+    }
+}
+
+impl Serialize for VmState {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.to_string().serialize(s)
+    }
+}
 ```
+
+The richer internal lifecycle (`Uninitialized`, `Starting`, `NotStarted`, `Running`, `Paused`, `Shutdown`) lives in [11-runtime-core.md § 3](./11-runtime-core.md#3-lifecycle) as `LifecyclePhase` and is **never serialized to the wire**. The `GET /` handler collapses it onto `VmState` with a single mapping (`Uninitialized | Starting | NotStarted → NotStarted`; `Running → Running`; `Paused → Paused`; `Shutdown → NotStarted` after the process refuses new requests). Anything sniffing the `state` string sees only the upstream three-value vocabulary.
 
 ### 2.3 Schema layer
 
 All API request / response structs are squib-defined Rust types with `#[serde(rename_all = "snake_case")]` for nested JSON (matching upstream) and `#[serde(rename_all = "kebab-case")]` only at the static-config-file top level. Field-level `#[serde(rename = "...")]` is reserved for the handful of upstream non-conformities (none currently known; reserve the lever).
 
-Validation runs at `serde` deserialization time via `validator`-derived rules:
-- length caps on every string (default 256 bytes; raise deliberately per field).
-- range caps on every numeric (`vcpu_count: 1..=host_max`, `mem_size_mib: 1..=host_ram_minus_overhead`, etc.).
-- regex allowlists on identifiers (`drive_id`, `iface_id`, `id`): `^[A-Za-z0-9_]{1,64}$`.
+`#[serde(deny_unknown_fields)]` on every endpoint struct. The static-config envelope is the *one* exception — it carries the `"squib": {...}` extension and must tolerate unknown keys for forward-compat, but the `"squib"` sub-object is itself `deny_unknown_fields` so typos inside it still fail loudly.
 
-`#[serde(deny_unknown_fields)]` everywhere except the top-level static-config envelope (which carries the `"squib": {...}` extension and must tolerate unknown keys for forward-compat).
+**Validation runs in `TryFrom`, not after `serde`.** Each external-facing struct is split into a `Raw<T>` shape with no validation rules (used as the literal serde target) and a validated `T` newtype with private fields. The pattern:
+
+```rust
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDriveConfig {
+    drive_id: String,
+    path_on_host: PathBuf,
+    is_root_device: bool,
+    is_read_only: bool,
+    cache_type: CacheType,
+    io_engine: IoEngine,
+    partuuid: Option<String>,
+    rate_limiter: Option<RateLimiter>,
+}
+
+#[derive(Deserialize)]
+#[serde(try_from = "RawDriveConfig", deny_unknown_fields)]
+pub struct DriveConfig { /* private fields */ }
+
+impl TryFrom<RawDriveConfig> for DriveConfig {
+    type Error = ValidationError;
+    fn try_from(r: RawDriveConfig) -> Result<Self, ValidationError> {
+        let drive_id = DriveId::new(r.drive_id)?;     // newtype runs the regex + length cap
+        let path     = SafePath::new(r.path_on_host)?; // canonicalize, reject ../, absolute, NUL
+        // ... validate every field, then construct
+        Ok(Self { drive_id, path, /* ... */ })
+    }
+}
+```
+
+Why not `validator::Validate::validate()`? Because that runs only when the caller remembers to call it. With `#[serde(try_from = "...")]` the validation is the *only* path from JSON to the domain type, and the type system makes "unvalidated `DriveConfig`" unrepresentable (private fields, no public constructor).
+
+Validation rules enforced this way:
+
+- length caps on every `String` (default 256 bytes; raise deliberately per field, in **bytes** not chars).
+- range caps on every numeric (`vcpu_count: 1..=32` per upstream `MAX_SUPPORTED_VCPUS`, `mem_size_mib: 1..=host_ram_minus_overhead`, etc.).
+- regex allowlists on identifiers (`drive_id`, `iface_id`, `id`): `^[A-Za-z0-9_]{1,64}$`.
+- bounded collection sizes (`drives: max 8`, `network_interfaces: max 8`, `pmem: max 4`).
+
+The `validator` crate is still pulled in — useful for derive-style annotations on `Raw*` shapes — but its `.validate()` call lives **inside** `TryFrom`, not as a post-deserialization afterthought. See [70-security.md § 4](./70-security.md#4-input-validation).
 
 Per-endpoint field rules live in [21-api-compat-matrix.md](./21-api-compat-matrix.md).
 
@@ -174,7 +240,7 @@ pub struct VcpuState {
 }
 ```
 
-Encoded with `bitcode` (matches upstream Firecracker post-1.10 — see [99-key-decisions.md § D5](./99-key-decisions.md#d5-snapshot-encoding-bitcode-not-versionize)).
+Encoded as the `data` field of the upstream-shaped `Snapshot<MicrovmState>` envelope (§ 6.1). Bitcode + serde — matches upstream Firecracker post-1.10. See [99-key-decisions.md § D5](./99-key-decisions.md#d5-snapshot-encoding-bitcode-encoded-snapshotmicrovmstate-not-raw-byte-prefixes).
 
 `SysReg` is an enum covering exactly the registers we touch — not the full ARMv8 set. Adding a register is a one-line enum extension plus a mapping in `squib-hv`. The full curated list lives in [13-arch-and-boot.md § 3](./13-arch-and-boot.md#3-sysreg-subset).
 
@@ -182,14 +248,37 @@ Encoded with `bitcode` (matches upstream Firecracker post-1.10 — see [99-key-d
 
 ### 6.1 State file (`<id>.snap`)
 
-```
-| magic_id        u64                       0x07101984_AAAA_0000 (aarch64)
-| version         length-prefixed UTF-8     "1.0.0" (squib snapshot format version)
-| state           length-prefixed bitcode   MicrovmState
-| crc64           u64                        ISO 3309 CRC-64 over magic..state
+Bit-identical to upstream Firecracker (`vendors/firecracker/src/vmm/src/snapshot/mod.rs`). The magic and version live **inside** a `bitcode`-encoded envelope, not as raw byte prefixes. A trailing 8-byte little-endian CRC-64 (ISO 3309) is appended after the bitcode blob.
+
+```rust
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SnapshotHdr {
+    pub magic:   u64,             // 0x0710_1984_AAAA_0000  (aarch64)
+    pub version: semver::Version, // currently semver "5.0.0" — pinned in lockstep
+                                  // with upstream `SNAPSHOT_VERSION`; bumped per
+                                  // upstream minor (D15)
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Snapshot<Data> {
+    pub header: SnapshotHdr,
+    pub data:   Data,             // MicrovmState for the on-disk file
+}
 ```
 
-All fields little-endian. Length prefixes are unsigned varint (`bitcode` defaults).
+On-disk layout:
+
+```
+| bitcode::serialize(Snapshot<MicrovmState>)   variable, no length prefix
+| crc64                                        u64 LE, ISO 3309, over the bitcode bytes
+```
+
+Notes:
+
+- The CRC is **not** part of the bitcode envelope; it is appended by a `CRC64Writer` wrapping the file, exactly as upstream does. Readers must split the trailing 8 bytes off before handing the prefix to `bitcode::deserialize::<Snapshot<MicrovmState>>(...)`.
+- `semver::Version` carries `major.minor.patch`; upstream rejects `major != SNAPSHOT_VERSION.major` or `minor > SNAPSHOT_VERSION.minor`. Squib follows the same compatibility rule so a state file produced by squib on cycle N is loadable by squib on cycle N+1 within the same major.
+- `bitcode = "0.6"` with the `serde` feature; `semver = "1"` with the `serde` feature.
+- `firecracker --describe-snapshot <squib-file>` against this layout deserializes structurally because the envelope is identical; the *contents* of `MicrovmState` (sysreg subset, GIC blob shape) are HVF-shaped and squib-1.0-specific — see [21-api-compat-matrix.md § 7](./21-api-compat-matrix.md#7-snapshot-file-format) and [99-key-decisions.md § D5](./99-key-decisions.md#d5-snapshot-encoding-bitcode-encoded-snapshotmicrovmstate-not-raw-byte-prefixes).
 
 ### 6.2 Memory file (`<id>.mem`)
 

@@ -14,7 +14,7 @@ Status: draft · Owner: squib-hv · Depends on: [11-runtime-core.md](./11-runtim
 
 `squib-hv` is **the** unsafe boundary in the workspace. It owns:
 
-- The HVF binding, via the `applevisor = "1.0"` crate (features = `["macos-26-0"]`).
+- The HVF binding, via the `applevisor = "1.0"` crate (features = `["macos-15-0"]`). The feature gate matches our minimum-supported macOS (D2). Bumping to `macos-15-2` for SME state save/restore or `macos-26-0` for Tahoe-only refinements is a deliberate D-record + roadmap conversation, not a silent dependency bump.
 - The vCPU run loop translating HVF exits into the squib-core `VmExit` algebra.
 - The in-kernel GICv3 wrapper around `hv_gic_*` (macOS 15+).
 - A thin Mach-exception helper used by the postcopy pager — see [16-snapshots.md § 5](./16-snapshots.md#5-postcopy--lazy-restore).

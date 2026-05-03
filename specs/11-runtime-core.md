@@ -67,7 +67,7 @@ The `BackendKind::Vz` variant is removed at workspace level — see [99-key-deci
 
 ## 3. Lifecycle
 
-A VM transitions through a small state machine, owned by the VMM event loop:
+A VM transitions through a small internal state machine, owned by the VMM event loop:
 
 ```
 Uninitialized
@@ -90,6 +90,34 @@ Running ────────────────────────
 
 Pre-boot vs post-boot admissibility per endpoint follows upstream Firecracker — see [21-api-compat-matrix.md § 1](./21-api-compat-matrix.md#1-http-api-endpoints).
 
+### 3.1 Internal `LifecyclePhase` vs wire `VmState`
+
+The internal phase enum is richer than what the wire exposes. Squib distinguishes `Uninitialized` (no config posted) from `NotStarted` (config posted, awaiting `InstanceStart`) from `Starting` (boot orchestration in progress) so handlers can produce precise `fault_message`s on misordered requests. None of those leak to clients:
+
+```rust
+pub enum LifecyclePhase {
+    Uninitialized,
+    NotStarted,
+    Starting,
+    Running,
+    Paused,
+    Shutdown,
+}
+
+impl LifecyclePhase {
+    /// Collapse to the upstream three-value vocabulary served by `GET /`.
+    pub fn wire_state(&self) -> VmState {
+        match self {
+            Self::Uninitialized | Self::NotStarted | Self::Starting | Self::Shutdown => VmState::NotStarted,
+            Self::Running => VmState::Running,
+            Self::Paused  => VmState::Paused,
+        }
+    }
+}
+```
+
+`VmState` is the wire shape pinned in [10-data-model.md § 2.2](./10-data-model.md#22-instanceinfo--get-) and serializes to the literal upstream strings (`"Not started"`, `"Running"`, `"Paused"`). SDKs and `firectl` see only those three values, never `Uninitialized` / `Starting` / `Shutdown`.
+
 ## 4. Threading model
 
 | Thread | Lives in | Notes |
@@ -107,6 +135,7 @@ Pre-boot vs post-boot admissibility per endpoint follows upstream Firecracker �
 1. `applevisor::Vcpu::*` calls *must* come from the creating thread. The HVF backend enforces this with a thread-local check; misuse panics in debug, returns `Error::Threading` in release. See [12-hvf-backend.md § 4](./12-hvf-backend.md#4-threading-rules).
 2. Cancellation is `Vcpu::cancel()` (which wraps `hv_vcpus_exit`) — async, idempotent, callable from any thread. We do **not** use signals.
 3. Snapshot save / restore drives every vCPU thread through `VcpuCommand::SaveState` and waits on the per-vCPU `oneshot`; the VMM event loop never reads vCPU registers directly.
+4. The `Vcpu` trait's run/get_reg/set_reg/get_sys_reg/set_sys_reg methods take `&mut self`, so the borrow checker prevents concurrent calls from the *same* thread; the thread-local check is the runtime backstop for accidental cross-thread moves. A typestate refinement (`VcpuHandle: Send` → `VcpuOnThread: !Send` after a one-shot `bind()`) is recorded as a follow-up in [99-key-decisions.md § D18](./99-key-decisions.md#d18-vcpu-thread-affinity-runtime-check-now-typestate-later) — runtime check ships in 1.0; typestate lands when the API churn cost is justified.
 
 Per CLAUDE.md § Async & Concurrency: Tokio multi-thread runtime explicitly enabled, message-passing over shared state, every spawned task awaited or explicitly detached with justification.
 

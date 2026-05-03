@@ -69,14 +69,14 @@ Target ≤ 10 µs measured on a synthetic MMIO bench (guest issues 1 M loads aga
 
 ### 6.1 Diff snapshot save
 
-Walk the dirty bitmap, `pwrite` only dirty pages. With 2 MiB-default granularity and 1% dirty rate on 1 GiB RAM:
+Walk the dirty bitmap, `pwrite` only dirty pages. With 2 MiB-default tracking granularity and 1% dirty rate on 1 GiB RAM:
 
 - ~5 dirty 2 MiB blocks = 10 MiB to write.
-- APFS sequential write ≥ 1 GiB/s on Apple SSD → 10 ms file IO.
-- ~30 ms overhead for state-blob encoding + bitmap drain.
-- Total ≤ 50 ms target.
+- APFS scattered-write to a sparse file (`pwrite` at 5 page-aligned offsets, not a contiguous run) ≈ 200–800 MB/s in practice on Apple SSD → 12–50 ms file IO. The ≥ 1 GiB/s figure for *sequential* writes is misleading here; the realistic envelope is wider.
+- ~20–30 ms overhead for state-blob encoding + bitmap drain (`AtomicU64::swap` per word).
+- Total ≤ 50 ms target — achievable but tight; if the criterion bench misses, the heuristic step-down (§ 6.3) and a smaller default tracking page are the levers, in that order.
 
-If the dirty rate spikes (workload-dependent), the heuristic drops to 4 KiB granularity for hot regions; per-page TLB shootdown cost is the limiter, not file IO.
+If the dirty rate spikes (workload-dependent), the heuristic drops to **host-page granularity** (16 KiB on Apple Silicon — see [99-key-decisions.md § D21](./99-key-decisions.md#d21-apple-silicon-host-page-is-16-kib-tracking-page-is-a-separate-concept)) for hot regions; per-page TLB shootdown cost is the limiter, not file IO. The earlier wording "4 KiB granularity" referred to a fictional Linux-derived size — Apple Silicon hosts use 16 KiB pages.
 
 ### 6.2 Postcopy restore
 

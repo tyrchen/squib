@@ -30,7 +30,7 @@ Day-1 commitments. No "Late" status — everything ships in 1.0.
 
 | Method | Path | Status | Notes |
 |--------|------|--------|-------|
-| GET | `/` | F | InstanceInfo: id, state, vmm_version="1.16-firecracker-compat (squib X.Y.Z)", app_name="Firecracker" (per spec; we identify as the API surface) |
+| GET | `/` | F | InstanceInfo: id, state, vmm_version="1.16-firecracker-compat (squib X.Y.Z)", app_name="Firecracker". `state` serializes to exactly the upstream three-value vocabulary: `"Not started"` (literal space, lowercase 's'), `"Running"`, `"Paused"`. Internal richer phases (`Uninitialized`/`Starting`/`Shutdown`) are collapsed via `LifecyclePhase::wire_state` ([11-runtime-core.md § 3.1](./11-runtime-core.md#31-internal-lifecyclephase-vs-wire-vmstate)). |
 | GET | `/version` | F | `{"firecracker_version": "1.16.0"}` for SDK version sniffers |
 | GET | `/vm/config` | F | full materialized VmmConfig |
 | PATCH | `/vm` | F | Pause/Resume |
@@ -63,9 +63,9 @@ Every endpoint defined in upstream Firecracker's `firecracker.yaml` (1.16.x) is 
 
 | Field | Status | Comment |
 |-------|--------|---------|
-| `vcpu_count` | F | bounded `1..=hv_vm_get_max_vcpu_count()` (≥ host physical cores cap) |
+| `vcpu_count` | F | bounded `1..=32`, matching upstream `MAX_SUPPORTED_VCPUS` (`vendors/firecracker/src/vmm/src/vmm_config/machine_config.rs`). Effective ceiling is `min(32, host_physical_cores, hv_vm_get_max_vcpu_count())` so we never accept a count we cannot actually run. |
 | `mem_size_mib` | F | bounded by host RAM minus hypervisor overhead |
-| `smt` | R | rejected with `fault_message` ("SMT not supported on Apple Silicon"); upstream restricts to even vcpu_count when true, on Apple Silicon there's no SMT |
+| `smt` | F | accepted as `false` (default); rejected with `fault_message` only when `true` is passed. Matches upstream behaviour on aarch64 (smt=true is restricted to x86 in the OpenAPI). |
 | `track_dirty_pages` | F | enables `hv_vm_protect`-based dirty bitmap |
 | `cpu_template` | P | "V1N1" applies aarch64 sysreg subset; x86 templates ("C3"/"T2"/etc.) accept-and-warn |
 | `huge_pages` | A | "2M" warns once; macOS manages page sizes |
@@ -247,13 +247,15 @@ These keys are `#[serde(default)]` and never required.
 
 | Element | Status |
 |---------|--------|
-| State file magic (`0x07101984_AAAA_0000` aarch64) | F |
+| Outer envelope: `bitcode::serialize(Snapshot{header: SnapshotHdr{magic, version: semver::Version}, data: MicrovmState})` followed by 8-byte LE CRC-64 ISO 3309 (bit-identical to upstream `vendors/firecracker/src/vmm/src/snapshot/mod.rs`) | F |
+| State file magic (`0x07101984_AAAA_0000` aarch64) — carried *inside* the bitcode envelope, not as a raw u64 prefix | F |
 | State file magic (`0x07101984_8664_0000` x86_64) | n/a (squib does not produce x86 snapshots) |
-| `bitcode + serde` encoding (matches upstream Firecracker post-1.10) | F |
+| `version` field of type `semver::Version`, validated by upstream's `major == SNAPSHOT_VERSION.major && minor <= SNAPSHOT_VERSION.minor` rule | F |
+| `MicrovmState` contents (sysreg subset, GIC blob shape) | P — wire envelope identical, *contents* are HVF-shaped. `firecracker --describe-snapshot` against a squib file deserialises and reports header/version/CRC; the embedded vCPU & GIC state is not consumable by KVM Firecracker. |
 | Memory file: full | F |
 | Memory file: sparse-of-dirty | F |
-| `--describe-snapshot` cross-format | best-effort |
-| Cross-VMM (KVM↔HVF) replay | not supported (different sysreg subset, different timer/GIC state); explicit non-goal |
+| `--describe-snapshot <squib-file>` invoked from upstream Firecracker | structurally compatible (header/version/CRC verify); inner state opaque |
+| Cross-VMM (KVM↔HVF) replay | not supported (different sysreg subset, different timer/GIC state); explicit non-goal — see [99-key-decisions.md § D10](./99-key-decisions.md#d10-cross-host-snapshot-replay-not-supported) |
 | Same-VMM save/restore | F |
 
 ## 8. Logger / Metrics field schema
@@ -267,7 +269,7 @@ Logger: same `[level] origin: message` shape, same rate-limited macros.
 Identical: `{"fault_message": "<reason>"}` with the same set of HTTP status codes (200, 204, 400, 413). `Server: Firecracker API` header on every response.
 
 Common 400 causes squib emits with the documented messages:
-- `"Invalid arch field for SMT: SMT not supported on Apple Silicon"` (R: `smt: true` rejected).
+- `"Invalid arch field for SMT: SMT not supported on Apple Silicon"` (R: `smt: true` rejected; `smt: false` and absence are F).
 - `"Invalid action: SendCtrlAltDel is x86-only and not supported on aarch64"` (R: x86-only action).
 - `"Invalid drive: vhost-user backend not supported on this build"` (A — actually accept-and-warn, not reject).
 

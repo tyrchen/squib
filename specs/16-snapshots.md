@@ -58,7 +58,7 @@ After a clean checkpoint:
      (single Vm::protect_memory call per region).
   2. Guest writes generate ESR EC=0x24, WnR=1 exits.
      The vCPU exit handler:
-       a. computes the page index (bit_idx = (far - ram_start) >> page_shift),
+       a. computes the page index (bit_idx = (far - ram_start) >> tracking_shift),
        b. sets bit_idx in a shadow Vec<AtomicU64>,
        c. re-grants HV_MEMORY_WRITE on that page (or 2 MiB block),
        d. resumes the vCPU.
@@ -67,15 +67,31 @@ After a clean checkpoint:
        b. write only dirty pages via pwrite at page-aligned offsets.
 ```
 
-**Granularity is 2 MiB by default**, dropping to 4 KiB only when the dirty-rate heuristic in the tracker says so. This bounds the TLB-shootdown cost — the real performance limiter. Recorded as [99-key-decisions.md § D11](./99-key-decisions.md#d11-dirty-tracking-2mib-default-with-4kib-fallback).
+### 4.1 Granularity — host page vs tracking page vs HVF stage-2 granule
 
-The shadow bitmap is per-RAM-region. For a 4 GiB region at 2 MiB granularity that's 256 bytes; at 4 KiB granularity it's 128 KiB. Either fits comfortably.
+Three sizes interact, all expressed in `squib-arch::layout::PageGeometry`:
 
-The handler re-grants on the **2 MiB block** containing the faulting page (default), so a single MiB-granular write triggers one fault and tolerates 511 subsequent writes within the block at full speed.
+| Size | Source | Value on Apple Silicon |
+|------|--------|------------------------|
+| `HOST_PAGE_SIZE` | `getconf PAGE_SIZE` / `sysconf(_SC_PAGESIZE)` | **16 KiB** (Apple Silicon native; we do not assume 4 KiB) |
+| `HVF_STAGE2_GRANULE` | smallest range `hv_vm_protect` will actually act on | 16 KiB (matches the host granule on Apple Silicon; `hv_vm_protect` rounds up to this) |
+| `TRACKING_PAGE_SIZE` | squib's chosen dirty-tracking unit | **2 MiB default**, may step down to 16 KiB for hot regions (per the heuristic in § 4.2) |
+
+The tracking unit is *not* "4 KiB" as some Linux-derived prior art suggests — Apple Silicon hosts use 16 KiB pages, and any granule strictly smaller than the host page is a fiction (`hv_vm_protect` will silently round up). Callers reading `page_shift` in code should use `TRACKING_PAGE_SIZE.trailing_zeros() as u8`; the constant is centralized so the bitmap math, the FAR-to-bit-index calculation, and the snapshot writer share one source of truth.
+
+Granularity choice is recorded as [99-key-decisions.md § D11](./99-key-decisions.md#d11-dirty-tracking-2-mib-default-with-host-page-fallback) (D11 supersedes the "4 KiB" wording with "minimum-host-page = 16 KiB" — the spirit of D11 was "trade tracking precision against TLB cost," not the literal page sizes).
+
+### 4.2 Bitmap sizing and adaptive heuristic
+
+Shadow bitmap is per-RAM-region. At 2 MiB tracking pages: 4 GiB region → 2048 bits = 256 bytes. At 16 KiB tracking pages: 4 GiB region → 256 K bits = 32 KiB. Either fits comfortably in cache.
+
+The handler re-grants on the **whole 2 MiB tracking block** containing the faulting page (default), so a single 16 KiB-granular write triggers one fault and the next 127 writes in the same block proceed at full speed. The adaptive step-down to 16 KiB tracking happens per-RAM-region when, in a 100 ms sliding window, the per-block fault rate exceeds 32 — i.e. the workload is touching most of a 2 MiB block per second and the over-counting in the Diff snapshot is paying for itself. The threshold (32 faults / 100 ms / 2 MiB block) is configurable via `[squib].snapshot.dirty_step_down_threshold` for tuning, with the default frozen as the first ship value so future contributors do not silently change perf characteristics.
 
 ## 5. Postcopy / lazy restore
 
-Optional infrastructure ships in 1.0; it powers the `mem_backend.backend_type=Uffd` path in `PUT /snapshot/load`. The implementation per [docs/research/hvf-performance-and-snapshots.md § 3](../docs/research/hvf-performance-and-snapshots.md):
+Optional infrastructure ships in 1.0. It powers `PUT /snapshot/load` with **two distinct** `mem_backend.backend_type` values — `File` and `Uffd` — selected unambiguously by the request, never by a runtime heuristic.
+
+The implementation per [docs/research/hvf-performance-and-snapshots.md § 3](../docs/research/hvf-performance-and-snapshots.md):
 
 ```text
 1. Allocate guest RAM with mach_vm_allocate, immediately mach_vm_protect(VM_PROT_NONE).
@@ -86,7 +102,7 @@ Optional infrastructure ships in 1.0; it powers the `mem_backend.backend_type=Uf
 4. A dedicated server thread (squib-host::pager) runs mach_msg(MACH_RCV_MSG)
    and dispatches MIG exception_raise calls.
 5. On fault:
-     a. copy bytes from snapshot file at the matching offset,
+     a. resolve the page from the configured page source (see § 5.1),
      b. mach_vm_protect(VM_PROT_READ | VM_PROT_WRITE),
      c. reply KERN_SUCCESS.
 6. The vCPU exit handler does the same for guest-side stage-2 faults.
@@ -94,7 +110,24 @@ Optional infrastructure ships in 1.0; it powers the `mem_backend.backend_type=Uf
 
 **Save and forward to prior exception ports** — LLDB attach must keep working. The pager thread, when it does not own the exception type, forwards via `mach_exception_raise` to the prior handler's port. Tested in CI with an `lldb` attach to a running squib.
 
-The page-server protocol mirrors the upstream Firecracker `Uffd` shape: `mem_backend.backend_path` is a UDS the page-server connects to; the server receives page-fault notifications and serves pages. Squib's pager talks to that server only when the snapshot file does not contain the page (i.e. for hot-restore scenarios).
+### 5.1 Page source — `File` vs `Uffd` are different backends, not modes of one
+
+Both backends use the same Mach-exception fault path (§ 5 step 5). They differ only in *where the page bytes come from*:
+
+- **`backend_type = "File"`** — `backend_path` is the path to the memory file from the snapshot pair. The pager `pread`s the page at `(ipa - ram_start)` and serves it directly. This is the simple "fast restore from local files" case.
+- **`backend_type = "Uffd"`** — `backend_path` is a UDS that an external page-server is listening on. The pager opens the UDS, sends a fault message in the upstream-Firecracker `Uffd` wire shape (page index, count), receives the page bytes back, then services the fault. The page-server is the *sole* source of pages; squib never reads its own snapshot file in this mode. This is the "page from a remote / lazy-loading store" case (e.g. live-migration receivers, page warmers).
+
+Picking the right backend is the operator's call at `PUT /snapshot/load` time. Squib never falls back from one to the other — that ambiguity is exactly what an operator does not want when their page-server has a bug.
+
+### 5.2 Pre-warming
+
+Before vCPU 0 runs, the pager pre-faults a small set of "boot-critical" pages so the first guest cycles are not all blocking on the pager:
+
+- The kernel's `_text` and `_stext` neighbourhoods (resolved from the FDT-recorded kernel load address + a fixed 2 MiB window).
+- The guest's stack page for vCPU 0 (resolved from the saved `SP_EL1` in the restored vCPU state).
+- The page containing the FDT.
+
+The boot orchestrator passes these three IPAs to the pager via the same `Vm::map_memory` call sequence that establishes the postcopy region; no separate side-channel.
 
 ## 6. API surface (mapping to wire endpoints)
 

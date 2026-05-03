@@ -4,7 +4,7 @@ Authoritative specifications for **squib** — a Firecracker-compatible microVM 
 
 ## Direction (current)
 
-Squib is **Apple-Silicon-only**, **HVF-only** (no VZ), **aarch64 Linux guests only**. Single 1.0 release with full Firecracker compatibility on day-one. See [99-key-decisions.md § D1–D4](./99-key-decisions.md) for the load-bearing trade-offs.
+Squib is **Apple-Silicon-only**, **HVF-only** (no VZ), **aarch64 Linux guests only**. Single 1.0 release with full Firecracker compatibility on day-one. See [99-key-decisions.md § D1–D21](./99-key-decisions.md) for the load-bearing trade-offs.
 
 ## Spec files
 

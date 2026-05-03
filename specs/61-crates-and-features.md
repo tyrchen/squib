@@ -112,8 +112,8 @@ linux-loader = { version = "0.13", features = ["pe"] }
 virtio-queue = "*"
 virtio-bindings = "*"
 
-# HVF
-applevisor = { version = "1.0", features = ["macos-26-0"] }
+# HVF — feature pinned to macOS 15 minimum (D2). See 12-hvf-backend.md § 1.
+applevisor = { version = "1.0", features = ["macos-15-0"] }
 
 # compression
 flate2 = "1"

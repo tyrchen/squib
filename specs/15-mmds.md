@@ -41,14 +41,14 @@ The implementation is a port of the upstream `dumbo` and `mmds` crates from Fire
 
 Wire pattern (mirrors upstream Firecracker):
 
-1. Guest emits ARP for `169.254.169.254` → `MmdsInterceptor` answers with the synthetic MAC `06:00:AC:1E:fe:fe`.
+1. Guest emits ARP for `169.254.169.254` → `MmdsInterceptor` answers with the synthetic MAC **`06:01:23:45:67:01`** (upstream `DEFAULT_MAC_ADDR` from `vendors/firecracker/src/vmm/src/mmds/ns.rs:32`; pinned byte-for-byte for compat).
 2. Guest emits TCP SYN to `169.254.169.254:80` → `Dumbo` accepts, emits SYN-ACK, completes the handshake.
 3. Guest sends HTTP request → `Dumbo` parses the headers; `Mmds` services the path.
 4. Response: V1 returns the JSON subtree at the requested pointer; V2 requires a `X-aws-ec2-metadata-token` header issued by a prior `PUT /latest/api/token` (TTL bounded by `mmds-config.token_ttl_seconds`).
 
 Intercepted packets never reach the host backend (vmnet, gvproxy). The interceptor runs synchronously on the device thread.
 
-TTL on response packets is fixed at 1 (link-local). Source MAC is the synthetic MMDS MAC. Source IP is `169.254.169.254`.
+TTL on response packets is fixed at 1 (link-local). Source MAC is the synthetic MMDS MAC `06:01:23:45:67:01`. Source IP is `169.254.169.254`.
 
 ## 4. API surface
 

@@ -1,14 +1,23 @@
 //! The hypervisor backend trait surface.
 //!
-//! `squib-vz` and `squib-hvf` each implement [`HypervisorBackend`] for their respective
-//! macOS frameworks. The VMM crate is generic over `dyn HypervisorBackend` so the two
-//! backends can be swapped at runtime via the `--hypervisor` CLI flag.
+//! Per [99-key-decisions.md § D1](../../../specs/99-key-decisions.md#d1-hvf-only-no-vz)
+//! squib ships exactly one production backend: HVF on Apple Silicon. The trait stays
+//! generic so the in-process [`BackendKind::Mock`] can stand in for unit tests without
+//! a live hypervisor.
 
 use crate::{
     error::Result,
     memory::{GuestMemoryRegion, GuestRange, Protection},
     vcpu::Vcpu,
 };
+
+/// Hard upper bound on `vcpu_count`, matching upstream Firecracker's `MAX_SUPPORTED_VCPUS`.
+///
+/// See `99-key-decisions.md` § D19. A launcher that asks for `vcpu_count > 32` succeeds
+/// against squib but fails against upstream Firecracker — that is a wire deviation we
+/// explicitly reject. Validation in the API layer caps requests at the minimum of
+/// `MAX_SUPPORTED_VCPUS`, `host_physical_cores`, and `hv_vm_get_max_vcpu_count()`.
+pub const MAX_SUPPORTED_VCPUS: u32 = 32;
 
 /// Identifies the concrete backend implementation reporting [`BackendCapabilities`].
 ///

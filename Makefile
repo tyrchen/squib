@@ -1,5 +1,6 @@
 CARGO ?= cargo
 ENTITLEMENTS := apps/squib/squib.entitlements
+ENTITLEMENTS_BRIDGED := apps/squib/squib-bridged.entitlements
 TARGET_DIR := $(shell $(CARGO) metadata --format-version 1 --no-deps | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')
 SQUIB_BIN := $(TARGET_DIR)/aarch64-apple-darwin/release/squib
 
@@ -33,9 +34,11 @@ doc:
 run:
 	@$(CARGO) run --bin squib --
 
-# Codesign the release binary with the hypervisor + vmnet entitlements. Ad-hoc identity
-# (`-`) is fine for local dev; CI uses a Developer ID. See
-# docs/research/hvf-prior-art-deep-dive.md §7 and aarch64-hvf-guest-stack.md §9.4.
+# Codesign the release binary with the default entitlements (hypervisor only).
+# Per D17 / 70-security.md §9, only the bridged-mode binary carries
+# `com.apple.vm.networking`; the default build sticks to the self-claimable
+# `com.apple.security.hypervisor`. Ad-hoc identity (`-`) is fine for local dev;
+# CI uses a Developer ID.
 sign: build-release
 	codesign --entitlements $(ENTITLEMENTS) \
 	         --options runtime \
@@ -43,8 +46,36 @@ sign: build-release
 	         --sign - \
 	         $(SQUIB_BIN)
 
+# Codesign with the bridged entitlements (adds `com.apple.vm.networking`).
+# Used for the separately-signed build that enables `--network=bridged`. Requires
+# the restricted form of the entitlement; ad-hoc signing here is for development
+# only — releases of this variant must be signed with a Developer ID that holds
+# the restricted entitlement.
+sign-bridged: build-release
+	codesign --entitlements $(ENTITLEMENTS_BRIDGED) \
+	         --options runtime \
+	         --force \
+	         --sign - \
+	         $(SQUIB_BIN)
+
 verify:
 	codesign --display --entitlements - $(SQUIB_BIN)
+
+# Build, ad-hoc sign, and run the squib-hv live HVF integration tests.
+#
+# `cargo test` does not codesign test binaries, but HVF refuses to initialise without
+# `com.apple.security.hypervisor`. The pattern below mirrors what the applevisor crate
+# does in its own Makefile: build with `--no-run`, codesign the produced test binaries,
+# then re-invoke `cargo test` (which re-uses the signed binaries because nothing
+# changed). Requires `jq`.
+hvf-test:
+	@$(CARGO) test -p squib-hv --tests --no-run --quiet
+	@for bin in $$($(CARGO) test -p squib-hv --tests --no-run --message-format=json 2>/dev/null \
+	                | jq -r 'select(.profile.test == true) | .filenames[]'); do \
+	    echo "signing $$bin"; \
+	    codesign --sign - --entitlements $(ENTITLEMENTS) --deep --force $$bin; \
+	done
+	@$(CARGO) test -p squib-hv --tests -- --nocapture
 
 # Notarize the signed binary. Requires APPLE_ID, APPLE_TEAM_ID, and an app-specific
 # password in env (or use --keychain-profile if you've set one up).
@@ -65,4 +96,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign verify notarize release update-submodule
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test notarize release update-submodule

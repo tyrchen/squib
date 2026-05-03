@@ -1,0 +1,22 @@
+[package]
+name = "squib-fdt"
+description = "Flattened device tree builder for squib's aarch64 microvm"
+categories = ["virtualization"]
+keywords = ["fdt", "device-tree", "aarch64", "linux"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+squib-arch = { workspace = true }
+squib-core = { workspace = true }
+thiserror = { workspace = true }
+vm-fdt = { workspace = true }

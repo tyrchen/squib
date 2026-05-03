@@ -12,6 +12,8 @@
 //! - [`exit`] — the [`VmExit`] enum that subsumes KVM's `VcpuExit` and HVF/VZ exit shapes.
 //! - [`vcpu`] — register file, interrupt descriptors, and the [`Vcpu`] trait.
 //! - [`backend`] — the [`HypervisorBackend`] / [`Vm`] trait pair plus capability discovery.
+//! - [`lifecycle`] — the internal [`LifecyclePhase`] state machine and the wire-shape
+//!   [`WireVmState`] surfaced by `GET /`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -19,11 +21,13 @@
 pub mod backend;
 pub mod error;
 pub mod exit;
+pub mod lifecycle;
 pub mod memory;
 pub mod vcpu;
 
-pub use backend::{BackendCapabilities, BackendKind, HypervisorBackend, Vm};
+pub use backend::{BackendCapabilities, BackendKind, HypervisorBackend, MAX_SUPPORTED_VCPUS, Vm};
 pub use error::{Error, Result};
 pub use exit::{DebugInfo, VmExit};
+pub use lifecycle::{LifecyclePhase, WireVmState};
 pub use memory::{GuestAddress, GuestMemoryRegion, GuestRange, Protection};
 pub use vcpu::{Irq, Regs, Vcpu};

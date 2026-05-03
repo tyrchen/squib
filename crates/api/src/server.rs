@@ -4,7 +4,7 @@
 //! - Long-lived connections multiplexed on a single Unix domain socket.
 //! - Every response carries `Server: Firecracker API`.
 //! - Bodies above the configured payload limit return `413 Payload Too Large`.
-//! - Unknown paths are translated by axum's fallback into our [`ApiError::NotFound`].
+//! - Unknown paths are translated by axum's fallback into our `ApiError::NotFound`.
 
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +23,8 @@ use tokio::net::UnixListener;
 use tower_http::{limit::RequestBodyLimitLayer, set_header::SetResponseHeaderLayer};
 use tracing::info;
 
+#[cfg(test)]
+use crate::schemas::VmState;
 use crate::{
     error::Result,
     schemas::{InstanceInfo, VersionResponse},
@@ -148,7 +150,7 @@ mod tests {
         fn instance_info(&self) -> InstanceInfo {
             InstanceInfo {
                 id: "anonymous".into(),
-                state: crate::schemas::InstanceState::NotStarted,
+                state: VmState::NotStarted,
                 vmm_version: "1.16.0 (squib 0.0.0-test)".into(),
                 app_name: "Firecracker".into(),
             }

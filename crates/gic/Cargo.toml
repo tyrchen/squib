@@ -1,0 +1,25 @@
+[package]
+name = "squib-gic"
+description = "Thin GICv3 wrapper over Apple Hypervisor.framework's hv_gic_* APIs"
+categories = ["virtualization", "os::macos-apis"]
+keywords = ["gicv3", "interrupt", "macos", "applevisor"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+applevisor = { workspace = true }
+
+[dependencies]
+squib-arch = { workspace = true }
+squib-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

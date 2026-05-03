@@ -16,7 +16,7 @@ use std::{
 };
 
 use squib_api::{
-    schemas::{InstanceInfo, InstanceState, VersionResponse},
+    schemas::{InstanceInfo, VersionResponse, VmState},
     server::{Runtime, ServeOptions, serve, unlink_socket_if_exists},
 };
 use tokio::{
@@ -35,7 +35,7 @@ impl Runtime for StubRuntime {
     fn instance_info(&self) -> InstanceInfo {
         InstanceInfo {
             id: self.id.clone(),
-            state: InstanceState::NotStarted,
+            state: VmState::NotStarted,
             vmm_version: format!("{} (squib 0.0.0-test)", self.fc_version),
             app_name: "Firecracker".into(),
         }
@@ -142,10 +142,19 @@ async fn get_root_returns_instance_info_with_firecracker_server_header() {
         Some("application/json".into())
     );
 
+    // Body must contain the upstream literal `"state":"Not started"` (space + lowercase
+    // 's'). SDKs sniff this string byte-for-byte; the squib draft used to emit
+    // `"NotStarted"` (PascalCase) and would have silently broken every Firecracker SDK.
+    let body_str = std::str::from_utf8(&body).expect("utf8 body");
+    assert!(
+        body_str.contains(r#""state":"Not started""#),
+        "body did not contain upstream-shaped state field; got: {body_str}"
+    );
+
     let info: InstanceInfo = serde_json::from_slice(&body).expect("parse json");
     assert_eq!(info.id, "anonymous");
     assert_eq!(info.app_name, "Firecracker");
-    assert_eq!(info.state, InstanceState::NotStarted);
+    assert_eq!(info.state, VmState::NotStarted);
     assert!(info.vmm_version.contains("1.16.0"));
 }
 

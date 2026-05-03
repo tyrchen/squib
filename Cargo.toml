@@ -61,6 +61,34 @@ tower-http = { version = "0.6", features = ["set-header", "trace", "limit"] }
 # raw HTTP parsing for integration tests
 httparse = "1.10"
 
+# rust-vmm
+vm-fdt = "0.3"
+linux-loader = { version = "0.13", default-features = false, features = ["pe"] }
+
+# kernel image compression
+flate2 = "1"
+zstd = "0.13"
+
+# parsing
+winnow = "0.6"
+
+# semver carried inside the snapshot envelope (10-data-model § 6.1)
+semver = { version = "1", features = ["serde"] }
+
+# HVF binding — see 12-hvf-backend.md § 1 and D2 for the macOS-15-0 feature rationale.
+# `default-features = false` is mandatory: applevisor's `default = ["macos-26-0"]` would
+# pull in macOS 26 symbols and fail at runtime on macOS 15.
+applevisor = { version = "1.0", default-features = false, features = ["macos-15-0"] }
+
+# benchmarking
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
+
 # workspace crates
 squib-core = { path = "crates/core" }
 squib-api = { path = "crates/api" }
+squib-arch = { path = "crates/arch" }
+squib-fdt = { path = "crates/fdt" }
+squib-loader = { path = "crates/loader" }
+squib-hv = { path = "crates/hv" }
+squib-gic = { path = "crates/gic" }
+squib-vmm = { path = "crates/vmm" }

@@ -1,0 +1,43 @@
+[package]
+name = "squib-vmm"
+description = "Squib VMM core: builder, vCPU thread, device manager, event loop"
+categories = ["virtualization"]
+keywords = ["vmm", "microvm", "firecracker", "aarch64"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+applevisor = { workspace = true }
+
+[dependencies]
+parking_lot = { workspace = true }
+squib-arch = { workspace = true }
+squib-core = { workspace = true }
+squib-fdt = { workspace = true }
+squib-gic = { workspace = true }
+squib-hv = { workspace = true }
+squib-loader = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+default = []
+bench = []
+
+[[bench]]
+name = "boot"
+harness = false
+required-features = ["bench"]

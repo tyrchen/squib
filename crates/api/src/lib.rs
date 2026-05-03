@@ -24,5 +24,5 @@ pub mod schemas;
 pub mod server;
 
 pub use error::{ApiError, FaultMessage, Result};
-pub use schemas::{InstanceInfo, InstanceState, VersionResponse};
+pub use schemas::{InstanceInfo, VersionResponse, VmState};
 pub use server::{Runtime, ServeOptions, serve};

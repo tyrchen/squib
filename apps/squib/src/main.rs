@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use squib_api::{
-    InstanceInfo, InstanceState,
+    InstanceInfo, VmState,
     server::{Runtime, ServeOptions, serve},
 };
 use tracing::info;
@@ -81,7 +81,7 @@ impl Runtime for StubRuntime {
     fn instance_info(&self) -> InstanceInfo {
         InstanceInfo {
             id: self.instance_id.clone(),
-            state: InstanceState::NotStarted,
+            state: VmState::NotStarted,
             vmm_version: format!(
                 "{FIRECRACKER_COMPAT_VERSION} (squib {})",
                 env!("CARGO_PKG_VERSION")

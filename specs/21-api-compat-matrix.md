@@ -76,7 +76,7 @@ Every endpoint defined in upstream Firecracker's `firecracker.yaml` (1.16.x) is 
 |-------|--------|---------|
 | `kernel_image_path` | F | Image, Image.gz (flate2), Image.zst (zstd), PE (linux-loader::pe) all supported |
 | `initrd_path` | F | placed at 1 GiB-aligned offset above kernel |
-| `boot_args` | F | passed verbatim; no defaults injected unless field is absent |
+| `boot_args` | F | user value passed verbatim (no rewriting); the FDT builder *appends* `console=ttyAMA0` and `panic=1` only if absent, and `root=PARTUUID=<uuid>` for the root drive when applicable. See [13-arch-and-boot.md § 6.1](./13-arch-and-boot.md#61-boot-args-composition). |
 
 ### `/drives/{id}` PUT
 
@@ -114,19 +114,20 @@ Every endpoint defined in upstream Firecracker's `firecracker.yaml` (1.16.x) is 
 | Field | Status | Comment |
 |-------|--------|---------|
 | `version` | F | V1 / V2 |
-| `network_interfaces` | F | binds dumbo intercept to listed iface IDs |
-| `ipv4_address` | F | link-local |
+| `network_interfaces` | F | binds dumbo intercept to listed iface IDs (max 8, matching the per-class cap on `network_interfaces`) |
+| `ipv4_address` | F | link-local; must be in `169.254.0.0/16`; default `169.254.169.254` |
 | `imds_compat` | F | |
+| `token_ttl_seconds` (V2 only) | F | bounded `1..=21600` (6 h, matches upstream `MAX_TOKEN_TTL_SECONDS`); default 21600 |
 
 ### `/balloon` PUT
 
 | Field | Status | Comment |
 |-------|--------|---------|
-| `amount_mib` | F | |
-| `deflate_on_oom` | F | |
-| `stats_polling_interval_s` | F | |
+| `amount_mib` | F | bounded `0..=mem_size_mib − 32` (matches upstream `MAX_BALLOON_SIZE_MIB`); a `PATCH` exceeding the cap returns 400 |
+| `deflate_on_oom` | F | guest's virtio-balloon driver respects this; squib forwards verbatim |
+| `stats_polling_interval_s` | F | bounded `0..=255`; `0` disables polling (matches upstream) |
 | `free_page_hinting` | F | |
-| `free_page_reporting` | F | uses `madvise(MADV_DONTNEED)` |
+| `free_page_reporting` | F | uses `madvise(MADV_DONTNEED)` to return memory to the host |
 
 ### `/snapshot/create` PUT
 
@@ -179,7 +180,7 @@ All fields F. File or FIFO targets both work; `mkfifo` is supported on macOS.
 | `--api-sock <path>` | F | default `/run/firecracker.socket` retained |
 | `--id <str>` | F | |
 | `--config-file <path>` | F | |
-| `--metadata <path>` | F | |
+| `--metadata <path>` | F | path to a JSON file whose contents seed the MMDS tree at startup, *before* the API server binds. Equivalent to issuing `PUT /mmds` immediately on first boot. File must be ≤ `--mmds-size-limit` bytes; oversize file is fatal at startup (clap-validated). |
 | `--no-api` | F | requires `--config-file` |
 | `--seccomp-filter <path>` | A | accept-and-warn (no Linux BPF on macOS) |
 | `--no-seccomp` | A | accept-and-warn |
@@ -266,12 +267,13 @@ Logger: same `[level] origin: message` shape, same rate-limited macros.
 
 ## 9. Error response shape
 
-Identical: `{"fault_message": "<reason>"}` with the same set of HTTP status codes (200, 204, 400, 413). `Server: Firecracker API` header on every response.
+Identical: `{"fault_message": "<reason>"}` with the same set of HTTP status codes (200, 204, 400, 413). `Server: Firecracker API` header on every response. Squib additionally emits **504 Gateway Timeout** when an `ApiAction` exceeds its per-class timeout from [70-security.md § 6](./70-security.md#6-resource-limits) — upstream Firecracker has no equivalent because its actions are bounded by KVM ioctls that complete or hard-fault, not by long-running orchestration; squib needs a way to surface "the VMM is wedged" without leaving the client hanging. 504 is documented in `docs/api-deviations.md` as a squib-only response code.
 
 Common 400 causes squib emits with the documented messages:
 - `"Invalid arch field for SMT: SMT not supported on Apple Silicon"` (R: `smt: true` rejected; `smt: false` and absence are F).
 - `"Invalid action: SendCtrlAltDel is x86-only and not supported on aarch64"` (R: x86-only action).
 - `"Invalid drive: vhost-user backend not supported on this build"` (A — actually accept-and-warn, not reject).
+- `"Snapshot rejected: <SnapshotError variant message>"` (R for malformed files; covers MagicMismatch / VersionMismatch / CrcMismatch / Incompatible per [11-runtime-core.md § 6](./11-runtime-core.md#6-error-types)).
 
 ## 10. Test surface
 

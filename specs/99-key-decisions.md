@@ -295,6 +295,76 @@ Each decision is permanent; supersede with a new D-id rather than editing in pla
 
 ---
 
+## D22 — Fixed MMIO layout sized for 32-vCPU worst-case GICR
+
+- **Context**: an earlier 13 § 2 layout placed virtio-MMIO at `0x0A00_0000` and the GIC redistributor at `0x080A_0000` with a 128 KiB stride. With `MAX_SUPPORTED_VCPUS = 32` (D19) the GICR live region ends at `0x080A_0000 + 32 × 0x20000 = 0x0E0A_0000`, **overlapping** the virtio-MMIO region for any `vcpu_count > 12`. Discovered during expert review.
+- **Alternatives considered**:
+  - Cap `vcpu_count` at 12 to fit the legacy layout (rejected: contradicts D19 and upstream `MAX_SUPPORTED_VCPUS = 32`).
+  - Compute the virtio-MMIO base dynamically from `vcpu_count` at boot (rejected: makes the FDT slot map vcpu-count-dependent and breaks the "kernel can hard-code MMIO if it wants" property).
+  - Reserve a fixed GICR window sized for the 32-vCPU worst case and place virtio-MMIO above it.
+- **Decision**: reserve `[0x080A_0000, 0x0E0A_0000)` (96 MiB headroom; the live GICR is a prefix of this), place PL011 at `0x0E0A_0000`, place virtio-MMIO at `0x0F00_0000`. The actual live GICR size in the FDT is `vcpu_count × hv_gic_get_redistributor_size` (queried at runtime, not hard-coded).
+- **Why**: the layout is a single source of truth that works for every supported `vcpu_count`. `hv_gic_*` queries handle the size; the layout owns the placement.
+- **Pinned by**: [13-arch-and-boot.md § 2](./13-arch-and-boot.md#2-memory-layout-concrete), [13-arch-and-boot.md § 10 I-AB-6](./13-arch-and-boot.md#10-invariants), [14-virtio-and-devices.md § 5](./14-virtio-and-devices.md#5-mmio-slot-allocation).
+- **Date**: 2026-05-03
+
+---
+
+## D23 — Boot-args composition rule
+
+- **Context**: Firecracker hard-codes `console=ttyS0 reboot=k panic=1 pci=off ...` into the kernel cmdline regardless of the user's `boot_args`. Squib's earlier 21 § 2 wording ("passed verbatim; no defaults injected unless absent") was contradictory — "verbatim" and "defaults injected" are mutually exclusive.
+- **Alternatives considered**:
+  - Strict pass-through: only what the user wrote (rejected: nearly every user config breaks because `console=` is missing).
+  - Hard-coded prepend (Firecracker style): always injects, may collide with user intent.
+  - Append-if-absent: user value takes precedence; squib appends squib-required defaults only if the user has not specified them.
+- **Decision**: append-if-absent. The FDT builder appends `console=ttyAMA0` (HVF uses PL011, not the x86 ttyS0), `panic=1`, and `root=PARTUUID=<uuid>` only if the corresponding key is not already present in the user's `boot_args`.
+- **Why**: matches user expectation ("if I set console=hvc0 you don't override it") while keeping the common case ergonomic ("I left console out, please pick a sensible default"). Diverges from Firecracker on aarch64 in the choice of UART (`ttyAMA0` vs `ttyS0`) — that is a hardware difference, not a policy one.
+- **Pinned by**: [13-arch-and-boot.md § 6.1](./13-arch-and-boot.md#61-boot-args-composition), [21-api-compat-matrix.md § 2 /boot-source](./21-api-compat-matrix.md#boot-source).
+- **Date**: 2026-05-03
+
+---
+
+## D24 — Edge-SPI pulse shape
+
+- **Context**: Apple's `hv_gic_set_spi(intid, level)` takes a level (`true`/`false`), not an edge. virtio-MMIO interrupts are FDT-flagged as edge-rising. How does squib produce an edge with a level API?
+- **Alternatives considered**:
+  - Maintain a per-INTID edge-state machine in squib; expose `assert_edge` / `assert_level` helpers.
+  - Pulse `set_spi(true)` immediately followed by `set_spi(false)` at the call site, no state in squib.
+  - Switch the FDT flag to level-high so we never produce edges (rejected: virtio devices rely on edge semantics for queue notifications; switching to level requires the device to actively de-assert, which adds round-trips).
+- **Decision**: pulse-and-reset at the call site. `Gic::pulse_spi(intid)` does `set_spi(intid, true)` then `set_spi(intid, false)` synchronously; the GIC's pending bit fires once and the controller observes the de-assertion immediately.
+- **Why**: matches the natural shape of virtio queue notifications (idempotent at the queue cursor; a missed pulse self-heals on the next notification). Avoids state in squib that would have to be snapshotted or reasoned about across pause/resume.
+- **Pinned by**: [12-hvf-backend.md § 6](./12-hvf-backend.md#6-gic--hv_gic_-only).
+- **Date**: 2026-05-03
+
+---
+
+## D25 — Snapshot save is atomic via temp-file and rename
+
+- **Context**: a snapshot save that fails midway (disk full, host crash, signal) should not leave the destination files corrupted, especially for the common pattern of overwriting yesterday's snapshot in place.
+- **Alternatives considered**:
+  - Stream directly to the destination paths (simple but corrupts on partial failure).
+  - Write to temp files in the same directory, fsync, then `rename(2)` to the destinations (the POSIX atomic-replace pattern).
+  - Write to a holding directory, then move at the end (more steps, no extra safety on local filesystems).
+- **Decision**: temp-file + fsync + atomic rename. `<id>.snap.tmp` and `<id>.mem.tmp` live as siblings of the destinations (same filesystem, so `rename(2)` is atomic on APFS / HFS+). Temp files are unlinked on any failure between open and the final rename.
+- **Why**: a half-disk-full host or a SIGTERM mid-save never corrupts the previous snapshot pair. The cost is one extra `rename(2)` per file and zero extra disk space (the temp file is the same size as the destination). The rename is *not* atomic *across* the pair (snap and mem are renamed sequentially), but the load path validates both files' magic+CRC and refuses to use a mismatched pair, so a crash between the two renames just leaves the operator with the previous good pair plus one stranded temp file.
+- **Pinned by**: [16-snapshots.md § 2](./16-snapshots.md#2-state-file).
+- **Date**: 2026-05-03
+
+---
+
+## D26 — 504 Gateway Timeout as a squib-only status code
+
+- **Context**: upstream Firecracker actions are bounded by KVM ioctls — they either complete or hard-fault, so upstream never needs a "VMM is wedged" response. Squib has long-running orchestration (snapshot save, postcopy load) that can stall on disk or page-server IO; without a timeout boundary the API client either hangs forever or gives up at its own timeout with no diagnostic.
+- **Alternatives considered**:
+  - Stretch the existing 500 response to mean "internal error or timeout" (rejected: conflates two very different operator actions — retry vs investigate).
+  - Always block until completion (rejected: a 4 GiB postcopy load against a wedged page-server hangs the orchestrator's poll loop forever).
+  - Add **504 Gateway Timeout** with a `fault_message` describing the action that exceeded its budget.
+- **Decision**: 504. Documented in `docs/api-deviations.md` as a squib-only response code; SDKs should treat it as "retry with the same idempotency key" rather than "fail closed."
+- **Why**: a timeout boundary is a correctness property for the orchestrator side; without it a wedged squib silently breaks the orchestrator's promise to its own clients. 504 is the standard "I am a gateway and the upstream did not respond" code; that is exactly what squib's API server is to the VMM event loop. Adopting an HTTP-standard code rather than overloading 500 keeps the response self-describing.
+- **Pinned by**: [20-firecracker-api.md § 3](./20-firecracker-api.md#3-error-envelope), [21-api-compat-matrix.md § 9](./21-api-compat-matrix.md#9-error-response-shape), [70-security.md § 6](./70-security.md#6-resource-limits).
+- **Date**: 2026-05-03
+
+---
+
 ## Cross-references
 
 - ← Read by: every component spec when justifying a non-obvious choice.

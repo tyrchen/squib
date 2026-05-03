@@ -82,14 +82,16 @@ The ESR_EL2 syndrome decoder is in `squib-arch` (see [13-arch-and-boot.md § 4](
 
 `squib-gic` (a thin wrapper crate over `applevisor::gic::*`) implements the `Gic` trait from squib-core. Lifecycle:
 
-1. `hv_gic_config_create` → set distributor base, redistributor base, MSI region (we do not use MSI in 1.0; configure with empty range).
-2. `hv_gic_create(cfg)` — fixes the layout.
-3. SPI assertion: `hv_gic_set_spi(intid, level)` for level-triggered, edge pulses via on/off pair.
-4. Snapshot: `hv_gic_state_create / get_size / get_data` — opaque blob, serialized into [`MicrovmState.gic_state`](./10-data-model.md#5-microvmstate--the-snapshot-state-blob).
+1. `hv_gic_config_create` → set distributor base (`0x0800_0000`), redistributor base (`0x080A_0000`), MSI region (we do not use MSI in 1.0; configure with empty range). Sizes queried via `hv_gic_get_distributor_size` / `hv_gic_get_redistributor_size`, **not** hard-coded — Apple may grow them in a future macOS release.
+2. `hv_gic_create(cfg)` — fixes the layout. Layout overlap-check (I-AB-6) runs before this call.
+3. SPI assertion:
+   - **Level-triggered** lines (PL011 UART, virtio-block when `VIRTIO_F_NOTIFY_ON_EMPTY` is negotiated): `hv_gic_set_spi(intid, true)` to assert; the device de-asserts with `false` once the guest acks the IRQ at the GIC.
+   - **Edge-rising** lines (the default for virtio-MMIO, FDT flag `1`): squib pulses with `set_spi(intid, true)` immediately followed by `set_spi(intid, false)` on the same call site. The pulse is observed by the GIC's pending-bit set, then immediately cleared at the controller; the guest sees one IRQ per pulse. No coalescing logic in squib — virtio's queue notification semantics are already idempotent at the queue cursor level, so a missed pulse just yields a re-check on the next notification. Recorded as [99-key-decisions.md § D24](./99-key-decisions.md#d24-edge-spi-pulse-shape).
+4. Snapshot: `hv_gic_state_create / get_size / get_data` — opaque blob, serialized into [`MicrovmState.gic_state`](./10-data-model.md#5-microvmstate--the-snapshot-state-blob). On restore, `hv_gic_set_state` runs **before** any `hv_vcpu_run`; the boot orchestrator gates on completion of this call (also pinned by I-SNAP-3 in [16-snapshots.md § 8](./16-snapshots.md#8-invariants)).
 
 There is **no** userspace distributor / redistributor emulation. Crate fails to initialise on macOS < 15.
 
-The MMIO base addresses are pinned in [13-arch-and-boot.md § 2](./13-arch-and-boot.md#2-memory-layout-concrete).
+The MMIO base addresses are pinned in [13-arch-and-boot.md § 2](./13-arch-and-boot.md#2-memory-layout-concrete); the INTID conventions are pinned in [13-arch-and-boot.md § 2.1](./13-arch-and-boot.md#21-gic-interrupt-id-conventions).
 
 ## 7. Memory mapping
 
@@ -108,8 +110,10 @@ Wraps `hv_vm_map`. Caller-allocated host buffer (anonymous mmap, RWX); `Protecti
 ## 8. Behaviour edges
 
 - **Cancellation race**: if `cancel()` arrives while the vCPU is in `pre_run_housekeeping`, the next `applevisor_vcpu.run()` returns `CANCELLED` immediately. No spurious exit; safe.
-- **Pending IRQ flush**: on resume from `Pause`, all pending IRQs in the per-vCPU shadow set are re-asserted via `set_pending_irq` before `run` is called.
+- **Pending IRQ flush**: on resume from `Pause`, all pending IRQs in the per-vCPU shadow set are re-asserted via `set_pending_irq` before `run` is called. The shadow set is a `Box<[AtomicU64]>` bitset; cross-thread injection from devices is `fetch_or(Relaxed)`, drain in `pre_run_housekeeping` is `swap(0, Acquire)` per word.
 - **vtimer**: `VtimerActivated` exits suspend the vCPU until either a guest WFI/WFE wakeup or a host timer fires. `vtimer_masked = true` is cleared on the next `set_pending_irq` for the timer's IRQ.
+- **HVC dispatch**: every HVC trap is forwarded as `VmExit::Hvc { imm16, x }` and resolved against the PSCI table in [13-arch-and-boot.md § 5](./13-arch-and-boot.md#5-psci-dispatch). Unknown function IDs return `PSCI_NOT_SUPPORTED` (`0xFFFF_FFFF` as a signed `i32` = `-1`) in X0 and advance PC by 4.
+- **SMC dispatch**: HVF surfaces SMC traps via `EC_SMC` (`0x17`). Squib has no secure-world support and never will: the VMM **sets X0 to `PSCI_NOT_SUPPORTED` (`0xFFFF_FFFF`)**, advances PC by 4, and resumes. This matches what KVM does when no PSCI conduit is registered for SMC and is what mainline Linux expects when the FDT declares `psci.method = "hvc"` (the kernel never issues SMC after that, but firmware probes can fire a single SMC at very early boot — if we returned an internal error, Linux would lock up). Logged at `debug` level only; SMC at runtime is normal probe traffic, not an error.
 - **Brk**: `EC_BRK` is forwarded as `VmExit::Brk` so the VMM can plug a debugger; default policy is to log at `error` and shut down.
 - **InternalError**: any unknown ESR class returns `InternalError(String)` rather than panicking. Caller logs at `error!` and returns `503 Service Unavailable` to the API.
 

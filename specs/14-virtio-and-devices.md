@@ -43,7 +43,7 @@ Each `VirtioMmioDevice` owns:
 - A `BusDevice` impl exposing the [virtio v1.2 MMIO register layout](https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html#x1-1340002).
 - `Arc<GuestMemory>` for descriptor reads and DMA.
 - One or more `VirtQueue` handles (one per virtio queue).
-- An `IrqLine` to the GIC: SPI 16..47 mapped per slot at `0x0A00_0000 + slot * 0x1000`.
+- An `IrqLine` to the GIC: per-slot raw INTID `48 + slot` (FDT SPI cell `16 + slot`), edge-rising. The MMIO BAR is at `0x0F00_0000 + slot * 0x1000` per [13-arch-and-boot.md § 2](./13-arch-and-boot.md#2-memory-layout-concrete) — base moved from `0x0A00_0000` to `0x0F00_0000` to clear the worst-case GICR window for 32 vCPUs (D22).
 
 Notification path:
 
@@ -115,28 +115,38 @@ Frontend ported from libkrun. UART backend writes to a regular file, a FIFO (`mk
 
 ### 4.7 virtio-pmem and virtio-mem
 
-- **virtio-pmem**: a memory-mapped file exposed as persistent memory to the guest. `mmap(file, MAP_SHARED)` plus a `Vm::map_memory` registration; flush semantics honor `VIRTIO_PMEM_REQ_TYPE_FLUSH`.
+- **virtio-pmem**: a memory-mapped file exposed as persistent memory to the guest. `mmap(file, MAP_SHARED)` plus a `Vm::map_memory` registration. `VIRTIO_PMEM_REQ_TYPE_FLUSH` is honored by issuing `msync(addr, len, MS_SYNC)` on the mapped range — synchronous because the virtio-pmem driver expects acknowledged durability before completing the request. The flush runs on `tokio::task::spawn_blocking` so the device thread is not blocked.
 - **virtio-mem**: memory hotplug. The device exposes a memory region but only some of it is mapped at boot; the guest requests `plug` / `unplug` via the virtio-mem queue; we issue `Vm::map_memory` / `Vm::unmap_memory` against per-block ranges. Verified that HVF allows the unmap/remap pattern at runtime (an open question in early drafts; resolved in week 8 of [91-impl-plan.md § 6](./91-impl-plan.md#6-phase-3-devices-and-mmds)).
 
 ### 4.8 boot-timer
 
-A trivial virtio device with no queues; reads the host monotonic clock and exposes it as a config-space register. Used to measure time-to-userspace. Fresh code, ~30 LOC.
+A trivial virtio device with no queues. The device exposes a 4-byte config-space register at offset `0x100`; on guest read, the register returns `(now_monotonic_ns − boot_start_ns)` truncated to `u32` microseconds (saturating at `u32::MAX` ≈ 71 minutes — boot doesn't take that long; the cap is just to avoid silent wrap). `boot_start_ns` is captured at the same point the kernel-load completes, so the value the guest reads after `init` runs is "time from the moment the kernel got control to the moment Linux first scheduled userspace." Used by the `boot.rs` criterion benchmark in [71-performance-budgets.md § 7](./71-performance-budgets.md#7-bench-harness). Fresh code, ~50 LOC.
 
 ## 5. MMIO slot allocation
 
-32 slots at `0x0A00_0000 + slot * 0x1000`, SPI 16..47. Allocation order at boot:
+32 slots at `0x0F00_0000 + slot * 0x1000`, raw INTIDs `48..79` (FDT SPI cells `16..47`). Allocation order at boot:
 
 ```
-slot 0  → virtio-block (root)
-slot 1  → virtio-net   (eth0)
-slot 2  → virtio-vsock
+slot 0  → virtio-block (root)                 INTID 48
+slot 1  → virtio-net   (eth0)                 INTID 49
+slot 2  → virtio-vsock                        INTID 50
 slot 3  → virtio-balloon (if /balloon configured)
 slot 4  → virtio-rng    (if /entropy configured)
 slot 5  → virtio-console (if /serial configured)
 slot 6+ → additional drives, additional NICs, virtio-pmem, virtio-mem, boot-timer
 ```
 
-The allocator is in `squib-vmm::builder` and emits the matching FDT `virtio_mmio@...` nodes.
+The allocator is in `squib-vmm::builder` and emits the matching FDT `virtio_mmio@...` nodes. The 32-slot ceiling is the hard cap — squib's per-class API caps (drives, NICs, pmem, etc., enforced in [10-data-model.md § 2.3](./10-data-model.md#23-schema-layer)) are calibrated so a fully-loaded valid configuration consumes ≤ 28 slots, leaving slack for diagnostic devices like `boot-timer` and runtime-added virtio-mem regions. Per-class caps:
+
+| Class | Cap | Rationale |
+|-------|-----|-----------|
+| `drives` | 8 | Lambda-shaped workloads rarely exceed 2; cap > 4 is generous |
+| `network_interfaces` | 8 | Same |
+| `pmem` | 4 | Each is a memory-mapped file; 4 covers nearly every observed config |
+| `virtio-mem` | 1 | One hotplug region per VM |
+| reserved | 11 | balloon, vsock, rng, console, boot-timer, future single-instance devices |
+
+Caps are enforced at JSON-deserialization time (TryFrom), not at boot, so misconfigurations 400 before the slot allocator runs.
 
 ## 6. Invariants
 

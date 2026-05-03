@@ -107,10 +107,10 @@ tower-http = { version = "0.6", features = ["set-header", "trace", "limit"] }
 
 # rust-vmm
 vm-memory = "0.17"
-vm-fdt = "*"           # latest at workspace bump time
+vm-fdt = "0.3"                                      # last release Nov 2023; stable API (research doc § 2.1)
 linux-loader = { version = "0.13", features = ["pe"] }
-virtio-queue = "*"
-virtio-bindings = "*"
+virtio-queue = "0.16"                               # pin to current minor; bump deliberately
+virtio-bindings = "0.2"
 
 # HVF — feature pinned to macOS 15 minimum (D2). See 12-hvf-backend.md § 1.
 applevisor = { version = "1.0", features = ["macos-15-0"] }

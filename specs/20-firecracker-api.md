@@ -77,11 +77,12 @@ A custom Axum `IntoResponse` impl on `ApiError` produces the `(StatusCode, Json<
 pub enum ApiError {
     #[error("invalid configuration: {0}")] BadRequest(String),       // 400
     #[error("payload too large")]           PayloadTooLarge,          // 413
+    #[error("VMM action timed out: {0}")]   Timeout(&'static str),    // 504 (squib-only; see 70-security § 6)
     #[error("internal error")]              Internal(#[source] Error),// 500 (rare; logs at error)
 }
 ```
 
-Status codes match upstream: 200 / 204 success; 400 / 413 client errors; 500 only on truly internal faults. Upstream Firecracker uses 400 (not 409) for state-machine conflicts (e.g. `PUT /boot-source` after boot); squib follows the same convention by surfacing those as `BadRequest` with the upstream `fault_message` text. No 404 — `axum`'s default 404 is overridden to a 400 with `fault_message="No such resource"`.
+Status codes match upstream where they exist: 200 / 204 success; 400 / 413 client errors; 500 only on truly internal faults. Upstream Firecracker uses 400 (not 409) for state-machine conflicts (e.g. `PUT /boot-source` after boot); squib follows the same convention by surfacing those as `BadRequest` with the upstream `fault_message` text. No 404 — `axum`'s default 404 is overridden to a 400 with `fault_message="No such resource"`. Squib adds **504 Gateway Timeout** as a squib-only response code for actions that exceed their per-class timeout (per [70-security.md § 6](./70-security.md#6-resource-limits)); upstream has no equivalent and no client SDK should fail closed on encountering it — orchestrators should retry with the same idempotency key.
 
 ## 4. State machine
 

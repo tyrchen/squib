@@ -174,6 +174,27 @@ pub enum Error {
     #[error("validation error")]
     Validation(#[from] validator::ValidationErrors),
 
+    #[error("event loop is gone (VMM has shut down)")]
+    EventLoopGone,
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum SnapshotError {
+    #[error("a vCPU did not ack quiesce within the timeout")]
+    QuiesceTimeout,
+    #[error("snapshot magic mismatch (file: {found:#x}, expected: {expected:#x})")]
+    MagicMismatch { found: u64, expected: u64 },
+    #[error("snapshot version {found} is incompatible with squib's {expected}")]
+    VersionMismatch { found: semver::Version, expected: semver::Version },
+    #[error("snapshot CRC64 mismatch")]
+    CrcMismatch,
+    #[error("snapshot is from a different VMM (sysreg or GIC blob shape mismatch)")]
+    Incompatible,
+    #[error("atomic commit (rename) failed: {0}")]
+    AtomicCommitFailed(#[source] std::io::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -182,6 +203,8 @@ pub type Result<T> = core::result::Result<T, Error>;
 ```
 
 `Option<T>` is **not** used to represent errors anywhere in the trait surface. `Option` only appears for genuinely-optional configuration (e.g. `initrd_path`).
+
+The `SnapshotError` variants are surfaced verbatim in the API's `fault_message` body for `PUT /snapshot/create` and `PUT /snapshot/load` failures, so an operator reading the response knows whether to retry (`QuiesceTimeout`, `Io`), reject the file (`MagicMismatch`, `VersionMismatch`, `CrcMismatch`), or rebuild it (`Incompatible`).
 
 ## 7. Invariants
 
@@ -193,6 +216,8 @@ pub type Result<T> = core::result::Result<T, Error>;
 | I-RC-4 | The VMM event loop is the only thread that mutates device state. | All device handles owned by VMM; cross-thread access only via `ApiAction` channel |
 | I-RC-5 | Pre-boot and post-boot endpoints reject requests in the wrong state with the upstream `fault_message`. | `RuntimeApiController` state-machine table; per-endpoint test in compat suite |
 | I-RC-6 | `BackendCapabilities` is queried once at VMM construction; runtime configuration that contradicts it is rejected at config-load. | Single call site; `RuntimeApiController` consults the cached struct |
+| I-RC-7 | `Error::EventLoopGone` is returned from any `oneshot::Receiver::await` after the VMM event loop has shut down; the API server surfaces it as a 500 with `fault_message="VMM event loop is gone"`. | Unit test killing the VMM mid-action |
+| I-RC-8 | `SnapshotError` variants map 1:1 to wire `fault_message` strings; renaming a variant requires a compat-suite golden update. | Snapshot golden test |
 
 ## 8. Cross-references
 

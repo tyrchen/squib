@@ -4,7 +4,7 @@ Authoritative specifications for **squib** — a Firecracker-compatible microVM 
 
 ## Direction (current)
 
-Squib is **Apple-Silicon-only**, **HVF-only** (no VZ), **aarch64 Linux guests only**. Single 1.0 release with full Firecracker compatibility on day-one. See [99-key-decisions.md § D1–D21](./99-key-decisions.md) for the load-bearing trade-offs.
+Squib is **Apple-Silicon-only**, **HVF-only** (no VZ), **aarch64 Linux guests only**. Single 1.0 release with full Firecracker compatibility on day-one. See [99-key-decisions.md § D1–D26](./99-key-decisions.md) for the load-bearing trade-offs.
 
 ## Spec files
 
@@ -30,7 +30,7 @@ Squib is **Apple-Silicon-only**, **HVF-only** (no VZ), **aarch64 Linux guests on
 | 80  | [80-glossary.md](./80-glossary.md) | glossary | Disambiguation of overloaded terms (backend, vsock vs TSI, sysreg vs reg, snapshot vs state file, jailer vs squib-jail, …). |
 | 90  | [90-roadmap.md](./90-roadmap.md) | roadmap | **Stakeholder-facing**: milestones M0–M5, exit criteria, calendar shape. |
 | 91  | [91-impl-plan.md](./91-impl-plan.md) | impl-plan | **Engineer-facing**: dependency-ordered phases, effort estimates, exit criteria. |
-| 99  | [99-key-decisions.md](./99-key-decisions.md) | decision-log | D1…D16 — the *why* behind every load-bearing choice. |
+| 99  | [99-key-decisions.md](./99-key-decisions.md) | decision-log | D1…D26 — the *why* behind every load-bearing choice. |
 
 ## Reading order
 

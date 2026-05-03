@@ -52,7 +52,7 @@ Target ≤ 10 µs measured on a synthetic MMIO bench (guest issues 1 M loads aga
 
 - Fast-path the common ECs (data abort, HVC) without allocation.
 - `BTreeMap` lookup on the bus: O(log N) over ≤ 32 entries → trivially cache-resident.
-- IRQ shadow in a per-vCPU `Vec<bool>`, not a Mutex-guarded HashSet.
+- IRQ shadow in a per-vCPU `Box<[AtomicU64]>` bitset (length = `(NR_INTIDS + 63) / 64 = 16` words for 1024 INTIDs). Devices on the VMM event loop set bits with `fetch_or(Relaxed)`; the vCPU thread drains with `swap(0, Acquire)` in `pre_run_housekeeping`. No `Vec<bool>` (would be racy under cross-thread injection); no `Mutex<HashSet>` (atomic bitset is cache-resident, lock-free, and matches the GIC's per-INTID natural shape).
 
 ## 5. Network throughput (P4)
 

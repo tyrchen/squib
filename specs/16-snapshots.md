@@ -26,18 +26,39 @@ The four sub-features:
 The wire shape is fixed in [10-data-model.md § 6.1](./10-data-model.md#61-state-file-idsnap). The producer:
 
 ```text
-Save:
-  1. Pause every vCPU (VcpuCommand::Pause; wait for ack).
-  2. For each vCPU: applevisor::Vcpu::sys_reg_get over the curated sysreg list (see 13-arch-and-boot.md § 3).
-  3. Capture GP regs + FP/SIMD regs.
-  4. hv_gic_state_create + get_size + get_data → opaque GIC blob.
-  5. Snapshot every device's config + virtqueue cursors.
-  6. Snapshot MMDS tree + V2 token store.
-  7. Encode MicrovmState with bitcode.
-  8. Write magic | version | bitcode_blob | crc64 to the state file path.
+Save (atomic-or-rollback):
+  1. Quiesce: send VcpuCommand::Pause to every vCPU; wait for ack.
+     If any vCPU fails to ack within 1 s, abort the save with
+     SnapshotError::QuiesceTimeout, resume the others, return 4xx.
+  2. Open <id>.snap.tmp and <id>.mem.tmp (sibling of the destinations,
+     same filesystem so the final rename is atomic).
+  3. For each vCPU: applevisor::Vcpu::sys_reg_get over the curated sysreg list
+     (see 13-arch-and-boot.md § 3).
+  4. Capture GP regs + FP/SIMD regs.
+  5. hv_gic_state_create + get_size + get_data → opaque GIC blob.
+  6. Snapshot every device's config + virtqueue cursors.
+  7. Snapshot MMDS tree + V2 token store.
+  8. Encode MicrovmState with bitcode.
+  9. Write the bitcode blob to <id>.snap.tmp via a CRC64Writer wrapper;
+     the writer appends the trailing 8-byte CRC.
+ 10. Write the memory image (Full or sparse-of-dirty) to <id>.mem.tmp.
+ 11. fsync(3) both temp files.
+ 12. rename(2) <id>.snap.tmp → <id>.snap and <id>.mem.tmp → <id>.mem.
+     If either rename fails, unlink any partially-renamed file and surface
+     SnapshotError::AtomicCommitFailed.
+ 13. Resume vCPUs (or leave Paused if resume_vm = false).
+
+Failure / cancellation:
+- If the API client drops the connection mid-save, the controller still
+  drives steps 1–13 to completion (a snapshot is a single transaction,
+  not a stream). The 204 just gets discarded.
+- If steps 3–11 fail, both temp files are unlinked; the destination
+  files are untouched.
 ```
 
 Restore is the symmetric inverse, with one wrinkle: the PSCI state machine is reset to BSP-running / secondaries-Off independent of the saved value, because vCPU thread identity differs between save and restore (HVF affinity contract). The guest sees a `PSCI_FEATURES`-equivalent VM and re-issues `CPU_ON` via its scheduler.
+
+The "atomic-or-rollback" rule above (steps 11–12) is what makes a half-disk-full host safe: a previous snapshot pair is never observably corrupted by a failed new snapshot. Recorded as [99-key-decisions.md § D25](./99-key-decisions.md#d25-snapshot-save-is-atomic-via-temp-file-and-rename).
 
 ## 3. Memory file
 
@@ -59,13 +80,17 @@ After a clean checkpoint:
   2. Guest writes generate ESR EC=0x24, WnR=1 exits.
      The vCPU exit handler:
        a. computes the page index (bit_idx = (far - ram_start) >> tracking_shift),
-       b. sets bit_idx in a shadow Vec<AtomicU64>,
+       b. sets bit_idx in a shadow Box<[AtomicU64]> bitset (fetch_or, Relaxed),
        c. re-grants HV_MEMORY_WRITE on that page (or 2 MiB block),
        d. resumes the vCPU.
   3. On snapshot:
-       a. drain the bitmap atomically (swap with zeros),
+       a. drain the bitmap atomically (per-word swap(0, Acquire)),
        b. write only dirty pages via pwrite at page-aligned offsets.
 ```
+
+### 4.0 TLB cost on live guests
+
+`hv_vm_protect` invalidates stage-2 TLB entries for the affected IPA range across all vCPUs. On Apple Silicon, this is a system-wide DSB + TLBI sequence; for a 4 GiB range stripped in one call, observed cost on M2 Pro is ~120 µs of vCPU stall per affected vCPU thread (measured in week 1 of Phase 5). That stall is paid **once per checkpoint**, not per page — the page-granularity work is the per-fault re-grant in step 2c, which only stalls the vCPU that took the fault. The choice to strip at region granularity (not per-page) is what makes this affordable; per-page strip would TLB-shoot once per page and is unworkable.
 
 ### 4.1 Granularity — host page vs tracking page vs HVF stage-2 granule
 
@@ -108,7 +133,13 @@ The implementation per [docs/research/hvf-performance-and-snapshots.md § 3](../
 6. The vCPU exit handler does the same for guest-side stage-2 faults.
 ```
 
-**Save and forward to prior exception ports** — LLDB attach must keep working. The pager thread, when it does not own the exception type, forwards via `mach_exception_raise` to the prior handler's port. Tested in CI with an `lldb` attach to a running squib.
+**Save and forward to prior exception ports** — LLDB attach must keep working in **both directions** (squib registers first then lldb attaches; lldb attaches first then squib registers). The pager:
+
+1. At `task_set_exception_ports(EXC_MASK_BAD_ACCESS, our_port, ...)` time, calls `task_swap_exception_ports` (not `task_set_exception_ports`) so the previous handler (kernel default, or LLDB's port) is captured.
+2. On every received message, attempts to resolve as a postcopy fault. If the IPA does **not** fall in any registered postcopy region, the pager forwards the exception via `mach_exception_raise_state_identity` (the MIG-generated forwarding shim) to the saved prior port and returns whatever `KERN_*` value the prior handler produced.
+3. If LLDB attaches **after** squib has called `task_swap_exception_ports`, LLDB's attach overwrites our handler. We catch this by re-reading the current ports on every `mach_msg` timeout (1 s default) and re-installing if they have drifted; this preserves both squib's faulting semantics and LLDB's debug session, at the cost of a one-second window where postcopy faults panic the guest. Documented in `docs/macos-setup.md` as "attach LLDB before booting the postcopy guest, not during."
+
+Tested in CI with two scenarios: (a) `lldb -p $(pgrep squib)` *during* postcopy load — must preserve both; (b) `lldb -p $(pgrep squib)` *before* `PUT /snapshot/load` — must preserve both.
 
 ### 5.1 Page source — `File` vs `Uffd` are different backends, not modes of one
 

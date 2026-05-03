@@ -70,6 +70,7 @@ A user with no prior squib install can:
 
 **Exit criteria**:
 - A guest with 1 vCPU, 256 MiB RAM, no devices, busybox initrd, runs `/sbin/init` and the host sees its first stdout byte.
+- An additional guest with **32 vCPUs**, 1 GiB RAM, busybox initrd, runs `/sbin/init` and `nproc` reports 32. (Smoke-test for the D22 GICR layout fix; without it, the guest hangs at GIC init when `vcpu_count > 12`.)
 - `cargo clippy -- -D warnings` clean, `cargo +nightly fmt --check` clean.
 
 **Not shipped publicly.** Internal demo only.

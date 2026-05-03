@@ -120,9 +120,10 @@ Why not `validator::Validate::validate()`? Because that runs only when the calle
 Validation rules enforced this way:
 
 - length caps on every `String` (default 256 bytes; raise deliberately per field, in **bytes** not chars).
-- range caps on every numeric (`vcpu_count: 1..=32` per upstream `MAX_SUPPORTED_VCPUS`, `mem_size_mib: 1..=host_ram_minus_overhead`, etc.).
+- range caps on every numeric (`vcpu_count: 1..=32` per upstream `MAX_SUPPORTED_VCPUS` / D19, `mem_size_mib: 1..=host_ram_minus_overhead`, `token_ttl_seconds: 1..=21600`, `balloon.amount_mib: 0..=mem_size_mib − 32`, `stats_polling_interval_s: 0..=255`, etc.).
 - regex allowlists on identifiers (`drive_id`, `iface_id`, `id`): `^[A-Za-z0-9_]{1,64}$`.
-- bounded collection sizes (`drives: max 8`, `network_interfaces: max 8`, `pmem: max 4`).
+- bounded collection sizes calibrated against the 32-slot virtio-MMIO budget (see [14-virtio-and-devices.md § 5](./14-virtio-and-devices.md#5-mmio-slot-allocation)): `drives: max 8`, `network_interfaces: max 8`, `pmem: max 4`, `virtio-mem: max 1`. A fully-populated valid configuration consumes ≤ 28 slots, leaving slack for boot-timer and runtime hotplug.
+- path-shaped strings additionally capped at 1024 bytes (`PATH_MAX` on Darwin) and validated for NUL bytes; UDS path strings capped at 104 bytes (Darwin `sun_path` size).
 
 The `validator` crate is still pulled in — useful for derive-style annotations on `Raw*` shapes — but its `.validate()` call lives **inside** `TryFrom`, not as a post-deserialization afterthought. See [70-security.md § 4](./70-security.md#4-input-validation).
 

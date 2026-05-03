@@ -69,7 +69,8 @@ The `validator` crate is a useful annotation surface (`#[validate(length(max = 2
 Per CLAUDE.md § Injection Prevention:
 
 - Reject `..`, absolute paths in fields meant to be relative, NUL bytes, OS-specific separators in identifiers.
-- For `path_on_host` (drives), `kernel_image_path`, `initrd_path`: canonicalize and verify the path actually opens with the expected file-type. Symlinks defeat naïve checks; we re-canonicalize after open where possible.
+- For `path_on_host` (drives), `kernel_image_path`, `initrd_path`, `snapshot_path`, `mem_file_path`: cap at `PATH_MAX = 1024` bytes (Darwin), canonicalize, and verify the path opens with the expected file-type (`stat(2)` post-open and assert `S_IFREG`). Symlinks defeat naïve checks; we re-canonicalize after open where possible.
+- For UDS paths (`api_sock`, `vsock.uds_path`, `mem_backend.backend_path` when `backend_type=Uffd`): cap at `sizeof(sockaddr_un.sun_path) − 1 = 103` bytes on Darwin. The UDS connect / bind silently truncates beyond this; a hard cap surfaces the misconfiguration as a 4xx instead of a "connection refused" debugging session.
 - For the chroot in `squib-jail`: re-canonicalize after open.
 
 ## 6. Resource limits
@@ -77,7 +78,19 @@ Per CLAUDE.md § Injection Prevention:
 Per CLAUDE.md § Resource Limits:
 
 - **HTTP body size**: `--http-api-max-payload-size` (default 51200, range 1024..=1_048_576), enforced by `tower_http::limit::RequestBodyLimitLayer`.
-- **Timeouts**: every network and disk IO operation in the runtime carries a `tokio::time::timeout`. UDS connect timeouts: 5 s. Per-API-action timeouts: 30 s default; snapshot operations bumped to 5 min for big memory files.
+- **Timeouts** (per `ApiAction` variant; pinned at the controller, not in the handler):
+
+  | Action class | Default timeout | Rationale |
+  |--------------|-----------------|-----------|
+  | Pre-boot configuration (every PUT/PATCH/DELETE on `/drives`, `/network-interfaces`, `/machine-config`, ...) | 5 s | Pure config state mutation; if it stalls something is stuck |
+  | `Action(InstanceStart)` | 30 s | Boot orchestration including FDT build, kernel load, GIC create |
+  | `PUT /snapshot/create` | 5 min | Bounded by memory-file write throughput; hard cap at 5 min on a 32 GiB VM |
+  | `PUT /snapshot/load` | 5 min | Symmetric; postcopy mode returns sooner but the open-file handshake counts |
+  | `PATCH /vm` (Pause/Resume) | 5 s | Quiesce wait |
+  | `PATCH /balloon` | 30 s | Ballooning to a large amount can take time as the guest releases pages |
+
+  Implemented as a per-action `tokio::time::timeout` wrapping the `oneshot::recv()`. On timeout the action is *not* cancelled (would leave the VMM in an undefined state); instead the API returns 504 with a `fault_message` and the controller logs the still-pending action at `error`.
+
 - **Concurrency caps**: bounded mpsc channels between API server and VMM event loop (capacity 1024). Bounded JoinSets for block-IO and per-disk worker threads.
 - **Recursion limits**: `serde_json` default recursion limit halved for untrusted input. `validator`-derived rules kick in at deserialization time so deeply nested JSON is bounded by the field-tree depth, not the parser.
 

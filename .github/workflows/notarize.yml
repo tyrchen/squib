@@ -1,0 +1,165 @@
+name: notarize
+
+# Post-merge asynchronous notarization. Decoupled from tag creation per the
+# impl-plan risk row "Notarytool stalls release" — a notarytool stall must
+# not gate a developer's `git push` or block a tag rollout. Triggered on
+# every push to master and on manual `workflow_dispatch`. The job uploads
+# the resulting notarization log on success or failure so the operator can
+# inspect Apple's verdict without re-running locally.
+#
+# Required repository secrets (configured under Settings → Secrets):
+#   APPLE_DEVELOPER_ID_APP_CERT_P12_BASE64  base64-encoded .p12 of the
+#                                           Developer ID Application cert
+#                                           (signs the Mach-O binaries)
+#   APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64
+#                                           base64-encoded .p12 of the
+#                                           Developer ID Installer cert
+#                                           (signs the .pkg)
+#   APPLE_DEVELOPER_ID_CERT_PASSWORD        password protecting both .p12s
+#   APPLE_ID                                Apple ID for the team
+#   APPLE_TEAM_ID                           10-char Apple Team ID
+#   APPLE_NOTARY_PASSWORD                   app-specific password for notarytool
+#
+# When any secret is unset (e.g. forks running this workflow without
+# notarization access) the job short-circuits as a no-op rather than
+# failing — see `notarize.guarded` step's condition.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel in-flight notarization runs when a newer commit lands; Apple's
+  # notarytool charges a small per-submission delay so debouncing matters.
+  group: notarize-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  notarize:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: notarize-aarch64-apple-darwin
+
+      - name: Build release binaries
+        run: make build-release
+
+      - name: Guard — bail if notarization secrets are not configured
+        id: secrets-guard
+        env:
+          APP_P12: ${{ secrets.APPLE_DEVELOPER_ID_APP_CERT_P12_BASE64 }}
+          INSTALLER_P12: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          if [ -z "$APP_P12" ] \
+             || [ -z "$INSTALLER_P12" ] \
+             || [ -z "$P12_PASSWORD" ] \
+             || [ -z "$APPLE_ID" ] \
+             || [ -z "$APPLE_TEAM_ID" ] \
+             || [ -z "$APPLE_NOTARY_PASSWORD" ]; then
+            echo "::warning::notarization secrets not configured; skipping codesign + notarize"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificates
+        if: steps.secrets-guard.outputs.configured == 'true'
+        env:
+          APP_P12: ${{ secrets.APPLE_DEVELOPER_ID_APP_CERT_P12_BASE64 }}
+          INSTALLER_P12: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/notarize.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d ' "')
+
+          # Import both certificates into the throwaway keychain so codesign
+          # (Mach-O) and productbuild (.pkg) each find the right identity.
+          for var in APP_P12 INSTALLER_P12; do
+            P12="$RUNNER_TEMP/${var}.p12"
+            eval "value=\$$var"
+            echo "$value" | base64 --decode > "$P12"
+            security import "$P12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/security
+          done
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign:,productbuild: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          APP_ID=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F\" '/Developer ID Application/ {print $2; exit}')
+          INST_ID=$(security find-identity -v "$KEYCHAIN" \
+            | awk -F\" '/Developer ID Installer/ {print $2; exit}')
+          if [ -z "$APP_ID" ] || [ -z "$INST_ID" ]; then
+            echo "::error::missing Developer ID identity (app=$APP_ID installer=$INST_ID)"
+            exit 1
+          fi
+          echo "APP_SIGN_ID=$APP_ID" >> "$GITHUB_ENV"
+          echo "INSTALLER_SIGN_ID=$INST_ID" >> "$GITHUB_ENV"
+          echo "Imported Developer ID identities"
+
+      - name: Codesign squib + squib-jail with hardened runtime
+        if: steps.secrets-guard.outputs.configured == 'true'
+        run: SIGN_ID="$APP_SIGN_ID" make sign-all
+
+      - name: Verify codesign + I-JAIL-3
+        if: steps.secrets-guard.outputs.configured == 'true'
+        run: |
+          make verify
+          make verify-jail-preserves-entitlements
+
+      - name: Build, notarize, and staple the .pkg installer
+        if: steps.secrets-guard.outputs.configured == 'true'
+        id: notarize
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # `make notarize` builds the .pkg via `make pkg`, submits to
+          # notarytool with --wait, and staples on success. The job-level
+          # `timeout-minutes: 60` caps the notarytool wait so a stall
+          # cannot block the lane indefinitely (impl-plan risk row
+          # "Notarytool stalls release"). We run pkg with the Installer
+          # identity (`SIGN_ID=$INSTALLER_SIGN_ID`) so productbuild signs
+          # with the right cert; the Mach-O binaries were already signed
+          # in the previous step with the App identity.
+          SIGN_ID="$INSTALLER_SIGN_ID" make notarize 2>&1 \
+            | tee "$RUNNER_TEMP/notarize.log"
+
+      - name: Upload notarization log + .pkg
+        if: always() && steps.secrets-guard.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notarize-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/notarize.log
+            target/aarch64-apple-darwin/release/squib-*.pkg
+          if-no-files-found: ignore
+          retention-days: 30

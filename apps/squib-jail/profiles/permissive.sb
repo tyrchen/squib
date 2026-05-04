@@ -1,0 +1,8 @@
+(version 1)
+;; Permissive sandbox profile bundled with squib-jail.
+;;
+;; Aligns with `specs/40-jailer.md` § 2.3: "close to no sandboxing; for
+;; debugging." Use only when developing squib itself or chasing a sandbox
+;; denial; **not** for production launches.
+
+(allow default)

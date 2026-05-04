@@ -1,0 +1,58 @@
+(version 1)
+;; Default sandbox profile bundled with squib-jail.
+;;
+;; Aligns with `specs/40-jailer.md` § 2.3:
+;;   - deny network egress (the guest itself reaches the network through
+;;     vmnet / gvproxy; the host-side jailer process does not need to talk
+;;     out)
+;;   - allow vmnet socket (mach-bootstrap lookup of the vmnet sharing
+;;     service is implicit in `process-info-listpids` plus
+;;     `mach-lookup com.apple.vmnet`)
+;;   - allow `/srv/jailer/<id>` r/w (the chroot will already restrict
+;;     filesystem visibility, but layered defence-in-depth is the point)
+;;
+;; This profile is permissive enough that a healthy squib boot completes;
+;; tighten only after a full integration test pass.
+
+;; Default deny — every operation must be explicitly allowed below.
+(deny default)
+
+;; Process and signal handling. The squib binary needs to fork worker
+;; threads and signal them; without this signals get rejected.
+(allow process-fork)
+(allow process-exec)
+(allow signal (target self))
+
+;; Filesystem. Allow read of system shared resources; allow read+write
+;; under the per-instance jail root. The jailer establishes the chroot
+;; before sandbox_init so the rooted view is what we constrain.
+(allow file-read* file-test-existence)
+(allow file-write*
+  (subpath "/srv/jailer")
+  (subpath "/private/tmp")
+  (subpath "/tmp"))
+
+;; IPC. squib's API socket lives at `/run/firecracker.socket` (or the
+;; operator's chosen path); the chroot's `/run` view is what the sandbox
+;; sees, so subpath-bind there is enough.
+(allow file-write-create
+  (subpath "/run"))
+
+;; Mach lookups. The vmnet sharing service is reached via mach-bootstrap.
+(allow mach-lookup
+  (global-name "com.apple.vmnet")
+  (global-name "com.apple.SystemConfiguration.configd"))
+
+;; Networking. UDS only — outbound TCP/UDP is denied by the default-deny
+;; above; we explicitly re-allow only loopback unix-socket traffic that
+;; squib itself uses for vsock multiplexing and the API server.
+(allow network-bind (local unix-socket))
+(allow network-outbound (local unix-socket))
+
+;; Sysctl reads — squib reads /proc-equivalent sysctl knobs at startup
+;; for HVF capability detection.
+(allow sysctl-read)
+
+;; Hypervisor entitlement is enforced separately at codesign time
+;; (`com.apple.security.hypervisor`); the sandbox cannot tighten it
+;; further but it also doesn't need to.

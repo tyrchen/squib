@@ -3,12 +3,19 @@ ENTITLEMENTS := apps/squib/squib.entitlements
 ENTITLEMENTS_BRIDGED := apps/squib/squib-bridged.entitlements
 TARGET_DIR := $(shell $(CARGO) metadata --format-version 1 --no-deps | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')
 SQUIB_BIN := $(TARGET_DIR)/aarch64-apple-darwin/release/squib
+SQUIB_JAIL_BIN := $(TARGET_DIR)/aarch64-apple-darwin/release/squib-jail
+
+# Codesign identity. Default ad-hoc (`-`) is fine for local development and
+# CI smoke; releases override `SIGN_ID` to a Developer ID hash. Both signed
+# variants run with hardened runtime (`--options runtime`) per
+# specs/70-security.md § 9 / R11.
+SIGN_ID ?= -
 
 build:
 	@$(CARGO) build --workspace --all-targets
 
 build-release:
-	@$(CARGO) build --release --bin squib
+	@$(CARGO) build --release --bin squib --bin squib-jail
 
 test:
 	@$(CARGO) test --workspace --all-features
@@ -38,12 +45,12 @@ run:
 # Per D17 / 70-security.md §9, only the bridged-mode binary carries
 # `com.apple.vm.networking`; the default build sticks to the self-claimable
 # `com.apple.security.hypervisor`. Ad-hoc identity (`-`) is fine for local dev;
-# CI uses a Developer ID.
+# CI uses a Developer ID via `SIGN_ID=<hash> make sign`.
 sign: build-release
 	codesign --entitlements $(ENTITLEMENTS) \
 	         --options runtime \
 	         --force \
-	         --sign - \
+	         --sign $(SIGN_ID) \
 	         $(SQUIB_BIN)
 
 # Codesign with the bridged entitlements (adds `com.apple.vm.networking`).
@@ -55,11 +62,58 @@ sign-bridged: build-release
 	codesign --entitlements $(ENTITLEMENTS_BRIDGED) \
 	         --options runtime \
 	         --force \
-	         --sign - \
+	         --sign $(SIGN_ID) \
 	         $(SQUIB_BIN)
 
-verify:
+# Codesign squib-jail with hardened runtime but no entitlements. The jailer
+# is libc-only (chroot+setuid+execv) and needs no Apple entitlement; the
+# `--entitlements` flag is omitted deliberately so `codesign -dvvv` reports
+# no entitlements bound — older codesign toolchains reject `<dict></dict>`
+# plists with "invalid or unsupported format for entitlements", and the
+# absence of the flag is the cleaner contract anyway.
+sign-jail: build-release
+	codesign --options runtime \
+	         --force \
+	         --sign $(SIGN_ID) \
+	         $(SQUIB_JAIL_BIN)
+
+# Sign both the squib and squib-jail release binaries with the default
+# entitlements. Use as the entry-point for distribution builds (the .pkg and
+# Homebrew bottle pipelines below depend on this).
+sign-all: sign sign-jail
+
+# `verify` covers both release binaries. The umbrella keeps `make sign-all
+# && make verify` symmetric — a release pipeline that signs two binaries
+# must verify two. Individual targets remain available for finer-grained
+# CI steps.
+verify: verify-squib verify-jail
+
+verify-squib:
 	codesign --display --entitlements - $(SQUIB_BIN)
+	codesign --verify --strict --verbose=2 $(SQUIB_BIN)
+
+# Verify squib-jail's signature. `--entitlements -` prints the embedded
+# plist to stdout; for the jailer the body is empty (no entitlements bound)
+# which is the contract the launcher integrity checks rely on.
+verify-jail:
+	codesign --display --entitlements - $(SQUIB_JAIL_BIN)
+	codesign --verify --strict --verbose=2 $(SQUIB_JAIL_BIN)
+
+# I-JAIL-3 boundary check: copying the squib binary into the chroot
+# preserves its codesignature byte-for-byte. Implements the
+# "codesign -dvvv check in CI after squib-jail runs" requirement from
+# `specs/40-jailer.md` § 5.
+verify-jail-preserves-entitlements: sign
+	@tmpdir=$$(mktemp -d) && \
+	  cp $(SQUIB_BIN) $$tmpdir/squib && \
+	  codesign --display --entitlements - $(SQUIB_BIN) 2>&1 | grep -v '^Executable=' > $$tmpdir/before.txt && \
+	  codesign --display --entitlements - $$tmpdir/squib 2>&1 | grep -v '^Executable=' > $$tmpdir/after.txt && \
+	  echo "--- before copy ---" && cat $$tmpdir/before.txt && \
+	  echo "--- after copy ---" && cat $$tmpdir/after.txt && \
+	  diff -u $$tmpdir/before.txt $$tmpdir/after.txt && \
+	  codesign --verify --strict --verbose=2 $$tmpdir/squib && \
+	  rm -rf $$tmpdir && \
+	  echo "I-JAIL-3 holds: codesign survived fs::copy"
 
 # Build, ad-hoc sign, and run the squib-hv live HVF integration tests.
 #
@@ -111,14 +165,50 @@ snapshot-smoke:
 	@$(CARGO) run --quiet -p squib -- --snapshot-version
 	@echo "snapshot-smoke: ok"
 
-# Notarize the signed binary. Requires APPLE_ID, APPLE_TEAM_ID, and an app-specific
-# password in env (or use --keychain-profile if you've set one up).
-notarize: sign
+# Build a stapleable installer .pkg carrying signed squib + squib-jail.
+# Drives `dist/pkg/build-pkg.sh`; sign-all gates the binaries first.
+# To produce a notarizable .pkg, set SIGN_ID to a Developer ID Installer
+# identity hash before invoking; the default ad-hoc identity makes the
+# .pkg installable but not notarizable.
+PKG_OUT := $(TARGET_DIR)/aarch64-apple-darwin/release/squib-$(shell $(CARGO) metadata --format-version 1 --no-deps | python3 -c 'import sys, json; print(json.load(sys.stdin)["packages"][0]["version"])').pkg
+
+pkg: sign-all
+	@SIGN_ID=$(SIGN_ID) ./dist/pkg/build-pkg.sh
+
+# Notarize the signed installer .pkg. Implements the Phase 6 exit criterion
+# from `specs/91-impl-plan.md` § 9: "make notarize produces a stapleable
+# .pkg that installs and runs on a fresh Apple Silicon Mac."
+#
+# Sequence:
+#   1. Build, sign, and assemble the .pkg via `make pkg`.
+#   2. Submit to Apple's notary service via xcrun notarytool. The --wait
+#      flag blocks until the notarytool verdict is in (or until the CI
+#      job-level timeout fires, whichever comes first — the impl-plan
+#      risk row "Notarytool stalls release" is mitigated by running this
+#      target on a post-merge async lane decoupled from tag creation;
+#      see .github/workflows/notarize.yml).
+#   3. Staple the notarization ticket onto the .pkg so it's installable
+#      offline (Gatekeeper check works without re-contacting Apple).
+#
+# Requires APPLE_ID, APPLE_TEAM_ID, and APPLE_NOTARY_PASSWORD (an
+# app-specific password) in the environment. Releases must also override
+# SIGN_ID to a Developer ID Installer identity; the default ad-hoc `-`
+# produces an unsigned .pkg that notarytool will reject.
+notarize: pkg
 	xcrun notarytool submit --wait \
 	  --apple-id $(APPLE_ID) \
 	  --team-id $(APPLE_TEAM_ID) \
 	  --password $(APPLE_NOTARY_PASSWORD) \
-	  $(SQUIB_BIN)
+	  $(PKG_OUT)
+	xcrun stapler staple $(PKG_OUT)
+	xcrun stapler validate $(PKG_OUT)
+
+# Print the path of the Homebrew formula. The formula is HEAD-only until
+# the first tagged release; after that this target should be extended to
+# update the `url` + `sha256` fields automatically.
+homebrew-formula:
+	@echo "Homebrew formula at: dist/homebrew/squib.rb"
+	@echo "Install with: brew install --HEAD --build-from-source ./dist/homebrew/squib.rb"
 
 release:
 	@$(CARGO) release tag --execute
@@ -153,4 +243,4 @@ demo: build-reference-vm
 	@$(CARGO) test -p squib-vmm --test linux_boot_smoke -- \
 	    --nocapture --include-ignored test_reference_vm_boots_linux_and_curls_mmds
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test vmnet-test snapshot-smoke build-reference-vm demo notarize release update-submodule
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged sign-jail sign-all verify verify-squib verify-jail verify-jail-preserves-entitlements hvf-test vmnet-test snapshot-smoke build-reference-vm demo notarize release update-submodule pkg homebrew-formula

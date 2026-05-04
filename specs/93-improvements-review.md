@@ -181,6 +181,60 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 - **P2** — `crates/host/src/pager.rs::mach_imp` ships the lifecycle skeleton (spawn → poll → drift-check → shutdown). The live `mach_msg(MACH_RCV_MSG)` loop, `task_swap_exception_ports` install + drift detection, and `mach_exception_raise_state_identity` forwarder for out-of-region faults are not wired. Fix shape: add a `pager-live-mach` cargo feature, plumb `mach2` (or hand-rolled FFI in `unsafe` blocks with `// SAFETY:` comments) inside `mach_imp`, gate the live LLDB-attach CI test (real `lldb -p $(pgrep <bin>) -o detach`) behind it.
 
+## Phase 6 (lands at end of Phase 6 review pass)
+
+### Spec amendment — fourth unsafe-allowed crate
+
+- **P2** — `specs/70-security.md:136` (I-SEC-1) and § 2 still read "`unsafe` lives only in `squib-hv` and `squib-net::sys`." Phase 5 widened the rule implicitly to `squib-host` (Mach exception ports); Phase 6 now adds `squib-jail` (libc privilege-drop syscalls + `sandbox_init(3)` FFI). Fix shape: amend I-SEC-1 to enumerate `squib-hv`, `squib-net::sys`, `squib-host`, and `squib-jail`; add a one-line note in 70 § 2 explaining the per-crate justification (FFI surface, not unsoundness).
+
+### Boundary input validation deferred to Phase 7 polish
+
+- **P2** — `apps/squib-jail/src/cli.rs:23-99` carries no explicit per-flag length cap. Per `specs/70-security.md` § 4 every external string from launchers crossing the trust boundary should be byte-bounded. clap's defaults are unbounded; a `--cgroup` value of 1 GiB would be accepted before reaching the parser. Fix shape: thread a `value_parser` chain (`clap::builder::StringValueParser::new().try_map(|s| { … })`) over `--id` / `--exec-file` / `--chroot-base-dir` / `--cgroup` / `--resource-limit` / `--parent-cgroup` / `--netns` / passthrough argv with explicit byte caps (≤256B for short fields, ≤1024B for paths).
+
+### TOCTOU on `--exec-file` canonicalize
+
+- **P2** — `apps/squib-jail/src/env.rs::canonicalize_exec_file` calls `fs::canonicalize` then `fs::metadata` (two stat calls). A racing rename between the two opens a TOCTOU window where the binary at the canonical path is not the binary that was checked. Per `specs/70-security.md` § 5 ("re-canonicalize after open") the right shape is `O_NOFOLLOW + fstat` against an open fd. Fix shape: open with `OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW)`, `fstat` the fd, copy via the fd into the chroot.
+
+### Daemonize without an initial fork
+
+- **P2** — `apps/squib-jail/src/sequence.rs::daemonize` calls `setsid()` directly. On a process that's already a process group leader (most launcher invocations), `setsid` returns EPERM and the daemonize step fails. The standard double-fork pattern is `fork() → child setsid → fork() → grandchild execs`. Fix shape: implement the fork prologue in `sequence::daemonize` and update `specs/40-jailer.md` § 3 step 5 to spell the contract out.
+
+### Chroot tree mode bits
+
+- **P2** — `apps/squib-jail/src/env.rs::stage` runs `fs::create_dir_all` inheriting the caller's umask (typically `022`, sometimes `002` when the process is started under a service manager). The chroot dir then has whatever mode the parent's umask permits. Fix shape: `fs::set_permissions(&self.chroot_dir, fs::Permissions::from_mode(0o755))` after `create_dir_all` completes.
+
+### `execv` does not sanitise environment
+
+- **P3** — `apps/squib-jail/src/sequence.rs::exec` uses `libc::execv`, inheriting the caller's full environment into the staged binary. Upstream jailer calls `execve` with a curated `envp` (PATH-only, plus a small allowlist). For squib's threat model (developer machine, trusted operator) this is low priority but worth tracking. Fix shape: add a `sanitize_env()` step that filters envp to a constant allowlist, or accept the inherited env explicitly via a doc note.
+
+### Homebrew formula needs `--locked`
+
+- **P3** — `dist/homebrew/squib.rb:32` runs `cargo build --release --bin squib --bin squib-jail` without `--locked`. Per `specs/70-security.md` § 10 (Supply chain), pinning to `Cargo.lock` is the only thing that prevents a yanked transitive from sneaking in between brew install and recipe-mtime. Fix shape: add `--locked` once a release-targeted `Cargo.lock` lands (currently the workspace's `Cargo.lock` is dev-mode).
+
+### `.pkg` builder shells out to `python3`
+
+- **P3** — `dist/pkg/build-pkg.sh:30-34` uses `python3 -c '…json.load(sys.stdin)…'` to extract the workspace version from `cargo metadata`. Some ephemeral CI runners ship without `python3` in PATH (they need to install it deliberately). The Makefile `hvf-test` target already requires `jq`; consolidating on jq drops the python dep. Fix shape: replace with `jq -r '.packages[0].version'`.
+
+### Jailer can be built on Linux to no purpose
+
+- **P3** — `apps/squib-jail/src/sandbox.rs:75-80` ships a non-macOS stub returning an error so the crate compiles on Linux, but the resulting binary is useless (Darwin syscalls won't link / run). Fix shape: gate the `[[bin]]` target in `apps/squib-jail/Cargo.toml` to `target.'cfg(target_os = "macos")'.dependencies` (or a `required-features` analog) so a Linux build skips the binary outright.
+
+### Default sandbox profile over-grants
+
+- **P3** — `apps/squib-jail/profiles/default.sb:42-43` allows `mach-lookup` of `com.apple.SystemConfiguration.configd` and `(allow sysctl-read)` is unrestricted. squib's actual sysctl reads are only the HVF-feature `hw.optional.arm.FEAT_*` set, and `configd` is needed only when squib-net opens a vmnet handle (which by then has its own entitlement). Fix shape: scope `sysctl-read` to a name allowlist; drop `configd` once an integration trace confirms it's unused.
+
+### `tracing-subscriber` feature bloat
+
+- **P3** — `apps/squib-jail/Cargo.toml:20` inherits the workspace's full feature set on `tracing-subscriber` (env-filter, fmt, json, …). The jailer is a sub-100ms one-shot binary that emits at most a handful of warnings; pulling JSON / ANSI / chrono dramatically inflates the binary. Fix shape: depend with `default-features = false, features = ["env-filter", "fmt"]` once a per-crate dependency override lands in workspace Cargo.toml.
+
+### Pre-existing: hvf_smoke test runs in plain `cargo test --workspace`
+
+- **P2** — `crates/hv/tests/hvf_smoke.rs::hvf_round_trips_an_hvc_trap_via_real_vcpu` requires HVF entitlement on the test binary (only `make hvf-test` codesigns the test binaries via `--no-run` + `codesign --force`). The test is not `#[ignore]`, so a vanilla `cargo test --workspace` (and the GitHub Actions `nextest run --all-features`) fails on the unsigned test binary. Verified pre-Phase-6 (`git stash && cargo test`). Fix shape: add `#[ignore = "requires com.apple.security.hypervisor — run via make hvf-test"]` to the test, mirroring the `#[ignore]`'d sandbox test in `apps/squib-jail/src/sandbox.rs`.
+
+### gvproxy bundling still deferred
+
+- **P3** — `specs/30-networking.md` § 4 requires `gvproxy` to ship under `<install-prefix>/libexec/squib/gvproxy`, but the `.pkg` builder (`dist/pkg/build-pkg.sh`) does not stage it. The Phase 4 review row "gvproxy bundling — binary not yet vendored" already tracks the underlying vendoring work. Phase 6 inherits the dependency: until a checksummed `gvproxy` lands in `vendors/gvproxy/`, the .pkg installer ships without userspace networking, and the Homebrew formula similarly cannot install it.
+
 ## Cross-references
 
 - ← Read by: every phase as the place to land out-of-phase findings.

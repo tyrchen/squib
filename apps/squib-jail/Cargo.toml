@@ -1,0 +1,25 @@
+[package]
+name = "squib-jail"
+description = "Drop-in Darwin shim for the Firecracker `jailer` binary"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "squib-jail"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+libc = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

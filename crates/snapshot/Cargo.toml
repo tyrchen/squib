@@ -1,0 +1,35 @@
+[package]
+name = "squib-snapshot"
+description = "Squib snapshot subsystem: bitcode state file, sparse memory file, dirty-page tracking"
+categories = ["virtualization"]
+keywords = ["snapshot", "firecracker", "microvm", "hvf", "aarch64"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+squib-arch = { workspace = true }
+squib-core = { workspace = true }
+
+bitcode = { workspace = true }
+crc64 = { workspace = true }
+parking_lot = { workspace = true }
+semver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

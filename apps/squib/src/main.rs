@@ -35,6 +35,25 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_tracing(args.level);
 
+    // `--snapshot-version` and `--describe-snapshot` are read-only side-channels;
+    // both exit before the API server starts. They short-circuit here so they do
+    // not require `--api-sock` / `--config-file`.
+    if args.snapshot_version {
+        println!("{}", squib_snapshot::SNAPSHOT_VERSION);
+        return Ok(());
+    }
+    if let Some(path) = args.describe_snapshot.as_deref() {
+        let desc = squib_snapshot::describe(path)
+            .map_err(|e| anyhow::anyhow!("describe-snapshot: {}", e.wire_message()))?;
+        print!("{}", desc.human());
+        if !desc.crc_ok {
+            // CRC failure is operator-visible but not a hard exit — the operator
+            // wanted to inspect the file, and they've now seen the warning.
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     if args.no_api && args.config_file.is_none() {
         anyhow::bail!("--no-api requires --config-file");
     }
@@ -142,10 +161,20 @@ async fn stub_vmm_loop(mut rx: ActionReceiver) {
                 }
             }
             ApiAction::SnapshotCreate(_) | ApiAction::SnapshotLoad(_) => {
-                warn!(action = label, "stub VMM: snapshot path not yet wired");
+                // Phase 5 ships the snapshot subsystem (`squib-snapshot`) — atomic
+                // save, sparse Diff memory file, dirty-page tracking, postcopy
+                // pager — but capturing live vCPU + GIC state requires the VMM
+                // event loop (Track A) to be plumbed through. The stub returns a
+                // deterministic `BadRequest` so SDKs see a stable shape.
+                warn!(
+                    action = label,
+                    "snapshot subsystem available; awaiting VMM event-loop integration",
+                );
                 ApiResponse::Fault {
                     status: 400,
-                    fault_message: "Snapshot subsystem not yet implemented (Phase 5)".into(),
+                    fault_message: "Snapshot subsystem ready but VMM event loop not yet wired \
+                                    (Track A in progress)"
+                        .into(),
                 }
             }
             ApiAction::Shutdown => {

@@ -146,6 +146,41 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 - **P3** — `crates/net/src/sys/iface_impl.rs::iface_uuid_for` builds a UUID-shaped string from a bespoke FNV mash rather than `uuid::Uuid::new_v5(&Uuid::NAMESPACE_OID, ...)`. Vmnet treats the value as opaque, but adding `uuid` to `[workspace.dependencies]` once any other crate adopts it would replace 30 lines of hand-rolled hash with a single call. Fix shape: amend `61-crates-and-features.md § 4` once the second consumer arrives, then port.
 
+## Phase 5 (lands at end of Phase 5 review pass)
+
+### Production-path `expect()` calls (CLAUDE.md violation)
+
+- **P2** — `crates/snapshot/src/save.rs:116` uses `dirty.expect("checked above")` to extract the bitmap reference after a structural pre-condition. The proof is correct (the `Some/None` check is two lines above), but CLAUDE.md "Error Handling" forbids `expect()` outside tests, and a future refactor that breaks the pre-condition would surface as a panic on a path reachable from `PUT /snapshot/create`. Fix shape: split `SnapshotKind` into `Full` / `Diff(&'a DirtyBitmap)` so the bitmap is part of the variant, not a sibling field — then the destructuring is total and no `expect` is needed.
+- **P2** — `crates/host/src/pager.rs:524, 565` use `expect("squib-pager thread spawn")`. `squib-host` is a library; `thread::Builder::spawn` only fails on `EAGAIN`, which is a real DoS surface. Fix shape: have `spawn_mach_server` return `io::Result<JoinHandle<...>>` and propagate the spawn error.
+
+### Wire-stability of positional sysreg encoding
+
+- **P2** — `crates/arch/src/sysregs.rs:132-137` (`SysReg::as_encoded`) uses `position()+1` in `SysReg::all()`. The doc says "never insert in the middle", but a wire format that silently reinterprets old keys when someone reorders the slice is a bug magnet — the compiler has no way to enforce the invariant. Fix shape: hand-assigned `u64` constants per variant, or a `const`-checked lookup table keyed on `Self as u8`. Do this before the snapshot format ships in a 1.0 tag.
+
+### Diff snapshot property test (I-SNAP-2)
+
+- **P2** — `specs/16-snapshots.md:188` (I-SNAP-2) asks for "Property test with synthetic write patterns". `crates/snapshot/tests/integration.rs::diff_round_trip_writes_only_dirty_pages` exercises one specific dirty pattern; no `proptest!` validates "the resulting `<id>.mem` carries the pattern bytes only at those offsets and zeros elsewhere" across randomized write distributions. Fix shape: add a proptest in the integration test that generates a random subset of pages, calls `mark_dirty` for each, and asserts byte-equality against the expected sparse pattern.
+
+### Cross-FS rejection has no live coverage
+
+- **P3** — `crates/snapshot/tests/integration.rs::cross_filesystem_temp_path_rejection` documents that the live cross-FS test runs out-of-band; CI does not currently exercise it. Fix shape: add a macOS-only test that creates a tmpfs ramdisk via `hdiutil attach -nomount ram://...`, mounts it under a known directory, and asserts `AtomicCommitCrossFs` when the snapshot dest sits there but the temp path doesn't.
+
+### `infer_memory_path` only handles `.snap`
+
+- **P3** — `crates/snapshot/src/load.rs:212-219` returns `None` for files named `vm.snapshot` or anything other than `*.snap`. Operators with non-default extensions get no hint about the matching memory file. Documented; matches Firecracker. Fix shape: accept any stem, swap the extension to `.mem`; raise the cap if it produces ambiguous matches in practice.
+
+### Style: explicit truncating casts in production code
+
+- **P3** — Several `as u64` / `as usize` casts in `crates/snapshot/src/state.rs:117`, `crates/host/src/pager.rs:181, 183, 636, 731` are silenced crate-wide via `#![allow(clippy::cast_possible_truncation)]`. CLAUDE.md prefers `u64::try_from(usize)` (infallible on 64-bit) for readability. Fix shape: switch to `try_from`; remove the crate-level allow once the call sites are clean.
+
+### vCPU + GIC HVF impl deferred
+
+- **P2** — `crates/snapshot/src/vcpu_save.rs` defines `VcpuSnapshotSource` / `VcpuRestoreTarget` / `GicSnapshotSource` / `GicRestoreTarget` with mock fixtures and round-trip tests, but `squib-hv` carries no impl yet — capture/restore against a live `applevisor::Vcpu` and `applevisor::Gic` is a phase-1-tail integration (same gating as the rest of the HVF binding). Fix shape: in `crates/hv/src/vcpu_save.rs`, implement the four traits over the curated `SysReg::all()` list; add a `make hvf-test`-gated integration test that round-trips a non-trivial vCPU state through a save/load cycle.
+
+### Pager live `mach_msg` server is feature-gated
+
+- **P2** — `crates/host/src/pager.rs::mach_imp` ships the lifecycle skeleton (spawn → poll → drift-check → shutdown). The live `mach_msg(MACH_RCV_MSG)` loop, `task_swap_exception_ports` install + drift detection, and `mach_exception_raise_state_identity` forwarder for out-of-region faults are not wired. Fix shape: add a `pager-live-mach` cargo feature, plumb `mach2` (or hand-rolled FFI in `unsafe` blocks with `// SAFETY:` comments) inside `mach_imp`, gate the live LLDB-attach CI test (real `lldb -p $(pgrep <bin>) -o detach`) behind it.
+
 ## Cross-references
 
 - ← Read by: every phase as the place to land out-of-phase findings.

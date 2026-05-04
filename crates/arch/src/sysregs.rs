@@ -122,6 +122,33 @@ pub enum SysReg {
 }
 
 impl SysReg {
+    /// A stable wire-encoding for use as a `BTreeMap<u64, u64>` key in
+    /// `VcpuState::sys_regs`.
+    ///
+    /// The encoding is `index_in_all() + 1` (1-based, so `0` is reserved for
+    /// "unknown"). Snapshot consumers must round-trip through
+    /// [`Self::from_encoded`] — the wire shape is squib-private (D6).
+    #[must_use]
+    pub fn as_encoded(self) -> u64 {
+        Self::all()
+            .iter()
+            .position(|r| *r == self)
+            .map_or(0, |i| (i as u64) + 1)
+    }
+
+    /// Inverse of [`Self::as_encoded`]. Returns `None` for keys not in the curated
+    /// list (forward-compat: a state file from a future squib build that added
+    /// registers in the middle would surface as `None` and the loader rejects
+    /// with `SnapshotError::Incompatible`).
+    #[must_use]
+    pub fn from_encoded(key: u64) -> Option<Self> {
+        if key == 0 {
+            return None;
+        }
+        let idx = usize::try_from(key - 1).ok()?;
+        Self::all().get(idx).copied()
+    }
+
     /// All curated sysregs, in canonical order. The order is the additive contract: new
     /// registers may be appended; never insert in the middle.
     #[must_use]
@@ -213,5 +240,21 @@ mod tests {
         // The boot-setup block is listed first per spec § 3; SCTLR_EL1 is the canonical
         // first entry.
         assert_eq!(SysReg::all()[0], SysReg::SctlrEl1);
+    }
+
+    #[test]
+    fn test_should_round_trip_as_encoded_through_from_encoded() {
+        for reg in SysReg::all() {
+            let key = reg.as_encoded();
+            assert_ne!(key, 0, "encoding must be non-zero for {reg:?}");
+            assert_eq!(SysReg::from_encoded(key), Some(*reg));
+        }
+    }
+
+    #[test]
+    fn test_should_reject_zero_and_out_of_range_encoded_keys() {
+        assert_eq!(SysReg::from_encoded(0), None);
+        let beyond = (SysReg::all().len() as u64) + 1;
+        assert_eq!(SysReg::from_encoded(beyond), None);
     }
 }

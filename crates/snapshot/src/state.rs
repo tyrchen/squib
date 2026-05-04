@@ -121,12 +121,45 @@ impl GicState {
 }
 
 /// MMDS data store + V2 token store, captured at snapshot time.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+///
+/// The store is held as a **JSON-serialized string** (not `serde_json::Value`)
+/// because the snapshot envelope encodes via `bitcode`, which does not implement
+/// `deserialize_any` and therefore cannot decode `serde_json::Value` directly.
+/// Use [`Self::data_value`] / [`Self::with_data`] to round-trip through a
+/// structured value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MmdsState {
-    /// The MMDS data store (free-form JSON).
-    pub data: serde_json::Value,
+    /// The MMDS data store, JSON-serialized. `"null"` for an empty store.
+    pub data_json: String,
     /// V2 session-token TTL, in seconds. `None` means MMDS V1 was active.
     pub token_ttl_seconds: Option<u32>,
+}
+
+impl MmdsState {
+    /// Build an `MmdsState` from a structured `serde_json::Value`.
+    ///
+    /// # Errors
+    /// Surfaces any `serde_json::Error` from re-serializing the value.
+    pub fn with_data(
+        value: &serde_json::Value,
+        token_ttl_seconds: Option<u32>,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            data_json: serde_json::to_string(value)?,
+            token_ttl_seconds,
+        })
+    }
+
+    /// Decode `data_json` back to a `serde_json::Value`.
+    ///
+    /// # Errors
+    /// Surfaces any `serde_json::Error` from parsing.
+    pub fn data_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        if self.data_json.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&self.data_json)
+    }
 }
 
 /// Top-level VM info: `mem_size_mib`, `smt`, CPU template, boot source.
@@ -371,6 +404,39 @@ mod tests {
             state.verify_compatible(),
             Err(SnapshotError::Incompatible)
         ));
+    }
+
+    #[test]
+    fn test_should_round_trip_populated_mmds_state() {
+        // Regression: an earlier draft stored `data` as `serde_json::Value`,
+        // which bitcode cannot decode (requires `deserialize_any`). The smoke
+        // test caught this when the demo state file refused to round-trip.
+        // The fix stores MMDS as a JSON string; this test pins it.
+        let mmds = MmdsState::with_data(
+            &serde_json::json!({"latest": {"meta-data": {"instance-id": "demo"}}}),
+            Some(3600),
+        )
+        .unwrap();
+        let state = MicrovmState {
+            vm_info: VmInfo {
+                mem_size_mib: 64,
+                smt: false,
+                cpu_template: String::new(),
+                kernel_image_path: "/k".into(),
+                initrd_path: None,
+                boot_args: String::new(),
+                track_dirty_pages: false,
+            },
+            vcpu_states: vec![VcpuState::new(0)],
+            device_states: DeviceStates::default(),
+            gic_state: GicState::from_bytes(vec![0xAA; 16]),
+            mmds_state: Some(mmds),
+        };
+        let back = round_trip(&state);
+        let restored = back.mmds_state.expect("MMDS round-trip dropped");
+        assert_eq!(restored.token_ttl_seconds, Some(3600));
+        let value = restored.data_value().unwrap();
+        assert_eq!(value["latest"]["meta-data"]["instance-id"], "demo");
     }
 
     #[test]

@@ -296,10 +296,11 @@ impl DirtyBitmap {
 /// Per-region adaptive controller: tracks **per-2-MiB-block** fault rate and
 /// signals when a region should step down from 2 MiB to 16 KiB tracking.
 ///
-/// Per [16-snapshots.md § 4.2](../../../specs/16-snapshots.md#42-bitmap-sizing-and-adaptive-heuristic)
-/// the threshold is "32 faults / 100 ms / 2 MiB block" — per-block, not aggregate
-/// across the region. A uniform-low-rate workload that touches many blocks must
-/// not trigger step-down; only a workload concentrated in *some* block must.
+/// Per [16-snapshots.md §
+/// 4.2](../../../specs/16-snapshots.md#42-bitmap-sizing-and-adaptive-heuristic) the threshold is
+/// "32 faults / 100 ms / 2 MiB block" — per-block, not aggregate across the region. A
+/// uniform-low-rate workload that touches many blocks must not trigger step-down; only a workload
+/// concentrated in *some* block must.
 #[derive(Debug)]
 pub struct AdaptiveController {
     threshold: u32,

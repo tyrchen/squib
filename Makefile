@@ -91,6 +91,26 @@ vmnet-test:
 	done
 	@$(CARGO) test -p squib-net --tests -- --nocapture --include-ignored
 
+# End-to-end smoke for the Phase 5 snapshot subsystem.
+# Generates a real <id>.snap + <id>.mem pair under /tmp via the live save
+# pipeline (bitcode envelope, CRC64 trailer, atomic temp-file + fsync + rename),
+# then exercises the squib binary's `--describe-snapshot` flag against it.
+# A second pass corrupts the trailing CRC byte and asserts that describe still
+# prints the metadata, reports `crc_ok: NO`, and exits with code 2.
+snapshot-smoke:
+	@rm -f /tmp/squib_smoke.snap /tmp/squib_smoke.mem /tmp/squib_smoke_corrupt.snap
+	@$(CARGO) run --quiet --example produce_demo_pair --package squib-snapshot -- /tmp/squib_smoke
+	@echo "--- describe (clean) ---"
+	@$(CARGO) run --quiet -p squib -- --describe-snapshot /tmp/squib_smoke.snap
+	@cp /tmp/squib_smoke.snap /tmp/squib_smoke_corrupt.snap
+	@python3 -c "p='/tmp/squib_smoke_corrupt.snap'; b=bytearray(open(p,'rb').read()); b[-1]^=0x01; open(p,'wb').write(bytes(b))"
+	@echo "--- describe (corrupt CRC; expect exit=2) ---"
+	@$(CARGO) run --quiet -p squib -- --describe-snapshot /tmp/squib_smoke_corrupt.snap; \
+	    rc=$$?; if [ $$rc -ne 2 ]; then echo "FAIL: corrupt describe returned $$rc, expected 2"; exit 1; fi
+	@echo "--- snapshot-version ---"
+	@$(CARGO) run --quiet -p squib -- --snapshot-version
+	@echo "snapshot-smoke: ok"
+
 # Notarize the signed binary. Requires APPLE_ID, APPLE_TEAM_ID, and an app-specific
 # password in env (or use --keychain-profile if you've set one up).
 notarize: sign
@@ -133,4 +153,4 @@ demo: build-reference-vm
 	@$(CARGO) test -p squib-vmm --test linux_boot_smoke -- \
 	    --nocapture --include-ignored test_reference_vm_boots_linux_and_curls_mmds
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test vmnet-test build-reference-vm demo notarize release update-submodule
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test vmnet-test snapshot-smoke build-reference-vm demo notarize release update-submodule

@@ -145,15 +145,26 @@ where
             advance_pc: true,
         },
         EsrDecoded::Hvc { imm16 } => {
+            // HVC and SMC are special on aarch64: the spec says
+            // ELR_EL2 (the "preferred return address") is set to the
+            // instruction *following* the HVC/SMC. HVF reflects that
+            // by reporting `PC = HVC_addr + 4` from
+            // `hv_vcpu_get_reg(PC)` after the trap. So we MUST NOT
+            // advance PC on the host side — doing so would skip the
+            // instruction after the HVC.
+            //
+            // (Data aborts, sysreg traps, and similar synchronous
+            // exceptions take the trapping instruction's address as
+            // ELR; for those we still advance.)
             let args = [gp_read(0), gp_read(1), gp_read(2), gp_read(3)];
             RunLoopDispatch {
                 exit: Exit::Hvc { imm16, args },
-                advance_pc: true,
+                advance_pc: false,
             }
         }
         EsrDecoded::Smc { imm16 } => RunLoopDispatch {
             exit: Exit::SmcHandledAsPsciNotSupported { imm16 },
-            advance_pc: true,
+            advance_pc: false,
         },
         EsrDecoded::SystemRegister {
             read,
@@ -298,9 +309,13 @@ mod tests {
     }
 
     #[test]
-    fn hvc_carries_x0_through_x3() {
+    fn hvc_does_not_advance_pc_because_hvf_already_did() {
+        // HVC's preferred return address (per ARMv8 ARM D1.10.2) is
+        // the instruction *after* the HVC. HVF sets PC = HVC_addr + 4
+        // before returning from `hv_vcpu_run`, so the host MUST NOT
+        // advance again. (See `crate::run_loop` doc.)
         let dispatch = decode_exception(esr(0x16, 0xABCD), 0, |i| u64::from(i) + 100);
-        assert!(dispatch.advance_pc);
+        assert!(!dispatch.advance_pc);
         match dispatch.exit {
             Exit::Hvc { imm16, args } => {
                 assert_eq!(imm16, 0xABCD);
@@ -311,9 +326,10 @@ mod tests {
     }
 
     #[test]
-    fn smc_routes_to_psci_not_supported_with_pc_advance() {
+    fn smc_routes_to_psci_not_supported_without_pc_advance() {
+        // Same rationale as HVC — SMC's ELR_x is the instruction after SMC.
         let dispatch = decode_exception(esr(0x17, 0x42), 0, |_| 0);
-        assert!(dispatch.advance_pc);
+        assert!(!dispatch.advance_pc);
         assert!(matches!(
             dispatch.exit,
             Exit::SmcHandledAsPsciNotSupported { imm16: 0x42 }

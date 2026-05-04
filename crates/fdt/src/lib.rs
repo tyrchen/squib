@@ -254,6 +254,12 @@ fn add_chosen(fdt: &mut FdtWriter, args: &FdtBuildArgs<'_>) -> Result<(), FdtErr
     let chosen = fdt.begin_node("chosen")?;
     fdt.property_string("bootargs", args.boot_args)?;
     fdt.property_string("stdout-path", "/pl011@e0a0000")?;
+    // `linux,earlycon` (no value, just a presence flag) tells the
+    // kernel to bind the early console to whatever `stdout-path`
+    // points at, without needing `earlycon=...` in the cmdline. Linux
+    // 5.x and 6.x both honour it. Doubles up with the cmdline form
+    // for belt-and-braces — neither breaks the other.
+    fdt.property_null("linux,earlycon")?;
     if let Some(rd) = args.initrd {
         fdt.property_u64("linux,initrd-start", rd.start)?;
         fdt.property_u64("linux,initrd-end", rd.end)?;

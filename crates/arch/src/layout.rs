@@ -9,6 +9,15 @@
 
 use squib_core::MAX_SUPPORTED_VCPUS;
 
+/// MSI region base. HVF's GIC interception only kicks in once
+/// distributor + redistributor + MSI are all configured (skipping MSI
+/// causes HVF to silently treat GIC accesses as unmapped, which
+/// surfaces as data aborts to the host). We park MSI well below the
+/// GICD at a 16 MiB-aligned address. The MSI region itself is sized
+/// by `hv_gic_get_msi_region_size` (typically 64 KiB on macOS 15+);
+/// reserve 16 MiB of headroom in case Apple grows it.
+pub const MSI_REGION_BASE: u64 = 0x0500_0000;
+
 /// GIC distributor base address.
 pub const GICD_BASE: u64 = 0x0800_0000;
 

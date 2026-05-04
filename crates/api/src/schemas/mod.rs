@@ -1,22 +1,65 @@
 //! Request and response types that mirror Firecracker's `OpenAPI` shapes.
 //!
-//! Field names match upstream's swagger exactly: `snake_case` in nested JSON, derived from
-//! `firecracker.yaml`. New schemas are added to this module as endpoints land.
+//! Two-shape pattern per [10-data-model.md §
+//! 2.3](../../../specs/10-data-model.md#23-schema-layer): every external-facing struct
+//! is split into a `Raw*` shape (the literal serde target with no validation rules) and
+//! a validated newtype with private fields. Validation runs **inside** `TryFrom`, not
+//! after `serde`. This makes "unvalidated `DriveConfig`" unrepresentable: the only path
+//! from JSON to the domain type is through the validating constructor.
 //!
-//! `state` on `InstanceInfo` is the **wire-shape** [`VmState`] enum from
-//! [10-data-model.md § 2.2](../../../specs/10-data-model.md#22-instanceinfo--get-): three
-//! variants only (`Not started`, `Running`, `Paused`). The richer internal
-//! [`squib_core::LifecyclePhase`] is collapsed to this on every `GET /` via
-//! `LifecyclePhase::wire_state`.
+//! Field names match upstream's swagger exactly (`snake_case` in nested JSON, derived
+//! from `firecracker.yaml`); the static-config envelope uses `kebab-case` only at the
+//! top level.
 
+pub mod actions;
+pub mod balloon;
+pub mod boot_source;
+pub mod common;
+pub mod config_file;
+pub mod cpu_config;
+pub mod drive;
+pub mod entropy;
+pub mod hotplug_memory;
+pub mod logger;
+pub mod machine_config;
+pub mod metrics;
+pub mod mmds;
+pub mod network;
+pub mod pmem;
+pub mod serial;
+pub mod snapshot;
+pub mod vm;
+pub mod vsock;
+
+pub use actions::{InstanceAction, InstanceActionInfo};
+pub use balloon::{BalloonConfig, BalloonHintingOp, BalloonStatsUpdate, BalloonUpdate};
+pub use boot_source::BootSourceConfig;
+pub use common::{
+    DriveId, IfaceId, InstanceId, MAX_DRIVES, MAX_NICS, MAX_PMEM, MAX_VIRTIO_MEM, MacAddr,
+    MemSizeMib, SafePath, UdsPath, VsockId,
+};
+pub use config_file::ConfigFile;
+pub use cpu_config::CpuConfig;
+pub use drive::{DriveConfig, DrivePatch};
+pub use entropy::EntropyConfig;
+pub use hotplug_memory::{HotplugMemoryConfig, HotplugMemoryUpdate};
+pub use logger::LoggerConfig;
+pub use machine_config::{MachineConfig, MachineConfigPatch};
+pub use metrics::MetricsConfig;
+pub use mmds::{MmdsConfig, MmdsContents};
+pub use network::{NetworkInterfaceConfig, NetworkPatch};
+pub use pmem::{PmemConfig, PmemPatch};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+pub use serial::SerialConfig;
+pub use snapshot::{SnapshotCreateConfig, SnapshotLoadConfig};
 use squib_core::WireVmState;
+pub use vm::VmStateChange;
+pub use vsock::VsockConfig;
 
 /// Body of `GET /version`.
 ///
 /// Upstream returns the literal Firecracker version string (e.g. `"1.16.0"`) so SDK
-/// version sniffers continue to work. Squib emits the same string for compatibility — see
-/// `specs/squib-api-compat-design.md` row `GET /version`.
+/// version sniffers continue to work. Squib emits the same string for compatibility.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct VersionResponse {
     /// Firecracker-compatible version string; what SDKs see when they probe the server.
@@ -103,7 +146,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_response_uses_snake_case_field() {
+    fn test_should_serialize_version_response_in_snake_case() {
         let v = VersionResponse {
             firecracker_version: "1.16.0".into(),
         };
@@ -112,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_info_round_trips() {
+    fn test_should_round_trip_instance_info() {
         let original = InstanceInfo {
             id: "anonymous".into(),
             state: VmState::NotStarted,
@@ -125,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_state_serializes_to_upstream_strings_verbatim() {
+    fn test_should_serialize_vm_state_to_upstream_strings_verbatim() {
         assert_eq!(
             serde_json::to_string(&VmState::NotStarted).unwrap(),
             r#""Not started""#
@@ -141,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_state_deserializes_only_upstream_strings() {
+    fn test_should_reject_pascalcase_vm_state_on_deserialize() {
         let s: VmState = serde_json::from_str(r#""Not started""#).unwrap();
         assert_eq!(s, VmState::NotStarted);
 
@@ -151,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_phase_collapses_to_vm_state_via_wire_state() {
+    fn test_should_collapse_lifecycle_phase_to_vm_state() {
         use squib_core::LifecyclePhase;
 
         let cases = [

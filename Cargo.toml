@@ -47,6 +47,7 @@ clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 bytes = "1.10"
 parking_lot = "0.12"
 smallvec = { version = "1.15", features = ["serde", "union"] }
+arc-swap = "1.7"
 
 # validation
 validator = { version = "0.20", features = ["derive"] }
@@ -92,3 +93,7 @@ squib-loader = { path = "crates/loader" }
 squib-hv = { path = "crates/hv" }
 squib-gic = { path = "crates/gic" }
 squib-vmm = { path = "crates/vmm" }
+squib-bus = { path = "crates/bus" }
+squib-virtio = { path = "crates/virtio" }
+squib-mmds = { path = "crates/mmds" }
+squib-legacy = { path = "crates/legacy" }

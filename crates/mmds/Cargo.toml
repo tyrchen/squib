@@ -1,0 +1,25 @@
+[package]
+name = "squib-mmds"
+description = "MMDS instance metadata service: data store, V2 token store, dumbo TCP/IP, MMDS interceptor"
+categories = ["virtualization"]
+keywords = ["mmds", "metadata", "imds", "firecracker"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+squib-core = { workspace = true }
+
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

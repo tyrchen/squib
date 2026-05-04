@@ -18,7 +18,15 @@
 #![allow(clippy::disallowed_methods)]
 
 pub mod builder;
+pub mod device_manager;
 pub mod resources;
+#[cfg(target_os = "macos")]
+pub mod runner;
 
 pub use builder::{BootArtifacts, BootError, build_microvm_for_boot};
+pub use device_manager::{
+    BlockConfigSpec, DeviceBuildArgs, DeviceError, DeviceLayout, build_device_layout,
+};
 pub use resources::{InitrdSource, KernelSource, VmResources};
+#[cfg(target_os = "macos")]
+pub use runner::{MicrovmHandle, RunResult, ShutdownReason, run_microvm};

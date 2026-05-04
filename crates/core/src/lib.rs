@@ -29,5 +29,7 @@ pub use backend::{BackendCapabilities, BackendKind, HypervisorBackend, MAX_SUPPO
 pub use error::{Error, Result};
 pub use exit::{DebugInfo, VmExit};
 pub use lifecycle::{LifecyclePhase, WireVmState};
-pub use memory::{GuestAddress, GuestMemoryRegion, GuestRange, Protection};
+pub use memory::{
+    GuestAddress, GuestMemory, GuestMemoryRegion, GuestRange, Protection, SliceGuestMemory,
+};
 pub use vcpu::{Irq, Regs, Vcpu};

@@ -1,10 +1,14 @@
-//! Axum router, the [`Runtime`] trait API handlers call into, and the [`serve`] entrypoint.
+//! Axum router on a Unix domain socket; the [`serve`] entrypoint.
 //!
-//! The router shape and middleware mirror upstream Firecracker:
-//! - Long-lived connections multiplexed on a single Unix domain socket.
-//! - Every response carries `Server: Firecracker API`.
-//! - Bodies above the configured payload limit return `413 Payload Too Large`.
-//! - Unknown paths are translated by axum's fallback into our `ApiError::NotFound`.
+//! Per [20-firecracker-api.md § 2](../../../specs/20-firecracker-api.md#2-server-shape):
+//!
+//! - Every response carries `Server: Firecracker API` (a `SetResponseHeaderLayer`).
+//! - Bodies above `--http-api-max-payload-size` return `413 Payload Too Large` via
+//!   `tower_http::limit::RequestBodyLimitLayer`.
+//! - Unknown paths are translated by the fallback into `400 BadRequest` with `{"fault_message": "No
+//!   such resource: ..."}`.
+//!
+//! The handler set lives in [`crate::handlers`]; this module is just plumbing.
 
 use std::{
     path::{Path, PathBuf},
@@ -13,21 +17,29 @@ use std::{
 
 use axum::{
     Router,
-    extract::State,
-    http::{HeaderName, HeaderValue, header},
-    response::Json,
-    routing::get,
+    extract::{MatchedPath, Request},
+    http::{HeaderValue, Response as HttpResponse, header},
+    routing::{get, patch, put},
     serve as axum_serve,
 };
 use tokio::net::UnixListener;
-use tower_http::{limit::RequestBodyLimitLayer, set_header::SetResponseHeaderLayer};
-use tracing::info;
+use tower_http::{
+    limit::RequestBodyLimitLayer, set_header::SetResponseHeaderLayer, trace::TraceLayer,
+};
+use tracing::{Span, info, info_span};
 
-#[cfg(test)]
-use crate::schemas::VmState;
 use crate::{
-    error::Result,
-    schemas::{InstanceInfo, VersionResponse},
+    controller::RuntimeApiController,
+    handlers::{
+        delete_drive, delete_network, delete_pmem, fallback, get_balloon, get_balloon_statistics,
+        get_hotplug_memory, get_machine_config, get_mmds, get_root, get_version, get_vm_config,
+        patch_balloon, patch_balloon_hinting, patch_balloon_statistics, patch_drive,
+        patch_hotplug_memory, patch_machine_config, patch_mmds, patch_network, patch_pmem,
+        patch_vm, put_actions, put_balloon, put_boot_source, put_cpu_config, put_drive,
+        put_entropy, put_hotplug_memory, put_logger, put_machine_config, put_metrics, put_mmds,
+        put_mmds_config, put_network, put_pmem, put_serial, put_snapshot_create, put_snapshot_load,
+        put_vsock,
+    },
 };
 
 /// The literal value upstream Firecracker emits for the `Server` header. SDKs and
@@ -37,19 +49,12 @@ pub const FIRECRACKER_SERVER_HEADER: &str = "Firecracker API";
 /// Default Firecracker-compat HTTP body limit (51200 bytes); overridable via [`ServeOptions`].
 pub const DEFAULT_MAX_PAYLOAD: usize = 51_200;
 
-/// Trait the API server calls into for state.
-///
-/// The VMM crate (`squib-vmm`) provides the production implementation. Tests and the
-/// CLI's pre-VMM-wiring stub provide their own. The trait is intentionally tiny right
-/// now — endpoints are added as they land.
-pub trait Runtime: Send + Sync + 'static {
-    /// Snapshot the current [`InstanceInfo`]. Called for every `GET /`.
-    fn instance_info(&self) -> InstanceInfo;
+/// Lower bound on the body limit ([70-security.md §
+/// 6](../../../specs/70-security.md#6-resource-limits)).
+pub const MIN_MAX_PAYLOAD: usize = 1_024;
 
-    /// The Firecracker-compatible version string surfaced via `GET /version` and
-    /// folded into [`InstanceInfo::vmm_version`].
-    fn firecracker_version(&self) -> String;
-}
+/// Upper bound on the body limit.
+pub const MAX_MAX_PAYLOAD: usize = 1_048_576;
 
 /// Configuration for [`serve`].
 #[derive(Debug, Clone)]
@@ -70,36 +75,115 @@ impl ServeOptions {
     }
 
     /// Override the body limit; matches the `--http-api-max-payload-size` CLI flag.
+    /// The value is clamped into `[MIN_MAX_PAYLOAD, MAX_MAX_PAYLOAD]`.
     #[must_use]
     pub fn with_max_payload_size(mut self, bytes: usize) -> Self {
-        self.max_payload_size = bytes;
+        self.max_payload_size = bytes.clamp(MIN_MAX_PAYLOAD, MAX_MAX_PAYLOAD);
         self
     }
 }
 
-/// Build the axum router with all middleware applied. Exposed for use in integration tests
-/// (callers can wrap it in `axum::serve` against any [`tokio::net::UnixListener`]).
-pub fn router<R: Runtime>(runtime: Arc<R>, max_payload: usize) -> Router {
+/// Build the axum router with all middleware applied. Exposed for use in integration
+/// tests (callers can wrap it in `axum::serve` against any [`tokio::net::UnixListener`]).
+///
+/// Middleware order (innermost first): handler → response-header `Server` →
+/// request-body cap → tracing span. Per [20-firecracker-api.md §
+/// 2](../../../specs/20-firecracker-api.md#2-server-shape), each request gets an
+/// `info`-level `tracing` span carrying `instance_id`, `method`, and the matched path
+/// pattern (not the raw URI — pattern names avoid PII like a `drive_id` in `path`).
+pub fn router(controller: Arc<RuntimeApiController>, max_payload: usize) -> Router {
     let server_header_value = HeaderValue::from_static(FIRECRACKER_SERVER_HEADER);
     let server_layer = SetResponseHeaderLayer::overriding(header::SERVER, server_header_value);
+    let instance_id = controller.snapshot().instance_info.id.clone();
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(move |req: &Request<_>| {
+            // Use the matched route pattern instead of `req.uri().path()` so identifiers
+            // baked into the URL (drive_id, iface_id, …) don't leak into log streams.
+            let matched = req
+                .extensions()
+                .get::<MatchedPath>()
+                .map_or("<unmatched>", MatchedPath::as_str);
+            info_span!(
+                "squib_api_request",
+                instance_id = %instance_id,
+                method = %req.method(),
+                path = %matched,
+            )
+        })
+        .on_request(())
+        .on_response(|_resp: &HttpResponse<_>, _latency: std::time::Duration, _span: &Span| {});
 
     Router::new()
-        .route("/", get(get_root::<R>))
-        .route("/version", get(get_version::<R>))
-        .with_state(runtime)
+        // Read-only fast path
+        .route("/", get(get_root))
+        .route("/version", get(get_version))
+        .route("/vm/config", get(get_vm_config))
+        // Mutating
+        .route("/vm", patch(patch_vm))
+        .route(
+            "/machine-config",
+            get(get_machine_config)
+                .put(put_machine_config)
+                .patch(patch_machine_config),
+        )
+        .route("/boot-source", put(put_boot_source))
+        .route(
+            "/drives/{id}",
+            put(put_drive).patch(patch_drive).delete(delete_drive),
+        )
+        .route(
+            "/network-interfaces/{id}",
+            put(put_network).patch(patch_network).delete(delete_network),
+        )
+        .route("/vsock", put(put_vsock))
+        .route("/mmds", get(get_mmds).put(put_mmds).patch(patch_mmds))
+        .route("/mmds/config", put(put_mmds_config))
+        .route(
+            "/balloon",
+            get(get_balloon).put(put_balloon).patch(patch_balloon),
+        )
+        .route(
+            "/balloon/statistics",
+            get(get_balloon_statistics).patch(patch_balloon_statistics),
+        )
+        .route("/balloon/hinting/{op}", patch(patch_balloon_hinting))
+        .route("/entropy", put(put_entropy))
+        .route("/serial", put(put_serial))
+        .route(
+            "/pmem/{id}",
+            put(put_pmem).patch(patch_pmem).delete(delete_pmem),
+        )
+        .route(
+            "/hotplug/memory",
+            get(get_hotplug_memory)
+                .put(put_hotplug_memory)
+                .patch(patch_hotplug_memory),
+        )
+        .route("/cpu-config", put(put_cpu_config))
+        .route("/actions", put(put_actions))
+        .route("/snapshot/create", put(put_snapshot_create))
+        .route("/snapshot/load", put(put_snapshot_load))
+        .route("/logger", put(put_logger))
+        .route("/metrics", put(put_metrics))
+        .fallback(fallback)
+        .with_state(controller)
         .layer(server_layer)
         .layer(RequestBodyLimitLayer::new(max_payload))
+        .layer(trace_layer)
 }
 
 /// Bind a Unix domain socket and serve the API on it until the future is dropped.
 ///
-/// Removes any stale socket file at `opts.socket_path` before binding (Firecracker does
-/// the same — long-running VMM hosts often relaunch with the same path).
+/// Removes any stale socket file at `opts.socket_path` before binding (Firecracker
+/// does the same — long-running VMM hosts often relaunch with the same path).
 ///
 /// # Errors
 /// Returns an error if the socket file cannot be unlinked, the bind fails, or the
 /// underlying axum service errors.
-pub async fn serve<R: Runtime>(opts: ServeOptions, runtime: Arc<R>) -> std::io::Result<()> {
+pub async fn serve(
+    opts: ServeOptions,
+    controller: Arc<RuntimeApiController>,
+) -> std::io::Result<()> {
     if opts.socket_path.exists() {
         tokio::fs::remove_file(&opts.socket_path).await?;
     }
@@ -110,19 +194,8 @@ pub async fn serve<R: Runtime>(opts: ServeOptions, runtime: Arc<R>) -> std::io::
         "squib-api listening",
     );
 
-    let app = router(runtime, opts.max_payload_size);
-    let serve_future = axum_serve(listener, app);
-    serve_future.await
-}
-
-async fn get_root<R: Runtime>(State(runtime): State<Arc<R>>) -> Result<Json<InstanceInfo>> {
-    Ok(Json(runtime.instance_info()))
-}
-
-async fn get_version<R: Runtime>(State(runtime): State<Arc<R>>) -> Result<Json<VersionResponse>> {
-    Ok(Json(VersionResponse {
-        firecracker_version: runtime.firecracker_version(),
-    }))
+    let app = router(controller, opts.max_payload_size);
+    axum_serve(listener, app).await
 }
 
 /// Best-effort cleanup helper: unlinks `path` if present, ignoring `NotFound`.
@@ -136,44 +209,37 @@ pub async fn unlink_socket_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
-// Allow tracing to actually mention `header` import.
-#[allow(dead_code)]
-const _SERVER_HEADER_TYPE: HeaderName = header::SERVER;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::{ControllerSnapshot, TimeoutTable};
 
-    struct FixedRuntime;
-
-    impl Runtime for FixedRuntime {
-        fn instance_info(&self) -> InstanceInfo {
-            InstanceInfo {
-                id: "anonymous".into(),
-                state: VmState::NotStarted,
-                vmm_version: "1.16.0 (squib 0.0.0-test)".into(),
-                app_name: "Firecracker".into(),
-            }
-        }
-        fn firecracker_version(&self) -> String {
-            "1.16.0".into()
-        }
+    fn ctl() -> Arc<RuntimeApiController> {
+        let snap = ControllerSnapshot::new("anonymous", "1.16.0", "1.16.0 (squib 0.0.0-test)");
+        let (c, _rx) = RuntimeApiController::new(snap, TimeoutTable::from_spec(), 16);
+        Arc::new(c)
     }
 
     #[test]
-    fn router_builds() {
-        let _ = router(Arc::new(FixedRuntime), DEFAULT_MAX_PAYLOAD);
+    fn test_should_build_router_against_controller() {
+        let _ = router(ctl(), DEFAULT_MAX_PAYLOAD);
     }
 
     #[test]
-    fn serve_options_defaults_match_firecracker() {
+    fn test_should_default_payload_limit_to_51200() {
         let opts = ServeOptions::new("/tmp/squib.sock");
-        assert_eq!(opts.max_payload_size, 51_200);
+        assert_eq!(opts.max_payload_size, DEFAULT_MAX_PAYLOAD);
     }
 
     #[test]
-    fn serve_options_override_payload_limit() {
-        let opts = ServeOptions::new("/tmp/squib.sock").with_max_payload_size(1024);
-        assert_eq!(opts.max_payload_size, 1024);
+    fn test_should_clamp_payload_limit_to_lower_bound() {
+        let opts = ServeOptions::new("/tmp/squib.sock").with_max_payload_size(0);
+        assert_eq!(opts.max_payload_size, MIN_MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn test_should_clamp_payload_limit_to_upper_bound() {
+        let opts = ServeOptions::new("/tmp/squib.sock").with_max_payload_size(usize::MAX);
+        assert_eq!(opts.max_payload_size, MAX_MAX_PAYLOAD);
     }
 }

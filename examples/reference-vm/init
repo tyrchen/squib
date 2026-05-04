@@ -1,0 +1,82 @@
+#!/bin/sh
+# Reference-VM init: minimal busybox-shaped userspace that exercises the
+# full squib boot path — pseudofs mount, virtio-net interface bring-up,
+# MMDS HTTP round-trip, banner emission to PL011, clean PSCI shutdown.
+#
+# This script runs as PID 1. It MUST poweroff at the end (squib has no
+# orphan-collector); a missing `poweroff -f` leaves the VM spinning.
+
+# Mount pseudofs FIRST so /proc and /dev are usable. We can't redirect
+# to /dev/kmsg until devtmpfs is up.
+mount -t devtmpfs none /dev 2>/dev/null || true
+mount -t proc     none /proc 2>/dev/null || true
+mount -t sysfs    none /sys 2>/dev/null || true
+mount -t tmpfs    none /tmp 2>/dev/null || true
+
+# Redirect ALL output to /dev/kmsg so messages flow into the kernel
+# printk ringbuffer (which squib reads from DRAM after the run when no
+# PL011 console binds). Without this, init's stdout/stderr go to
+# /dev/console, which is the dummycon (silent) on this kernel build.
+exec >/dev/kmsg 2>&1
+
+# Now `set -e`: a failing command must surface, not silently exit.
+set -e
+
+echo "[init] pseudofs mounted; cmdline:"
+cat /proc/cmdline || echo "[init] cmdline read failed"
+
+# Parse kernel cmdline. Squib passes:
+#   squib_demo_ip=<addr>     guest IPv4 address (default 169.254.169.50)
+#   squib_demo_path=<path>   MMDS HTTP path (default /latest/meta-data/instance-id)
+SQUIB_IP="169.254.169.50"
+SQUIB_PATH="/latest/meta-data/instance-id"
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        squib_demo_ip=*)   SQUIB_IP="${arg#squib_demo_ip=}" ;;
+        squib_demo_path=*) SQUIB_PATH="${arg#squib_demo_path=}" ;;
+    esac
+done
+
+# Wait for eth0 to appear (the kernel binds virtio-net asynchronously).
+echo "[init] waiting for eth0"
+for i in $(seq 1 50); do
+    if ip link show eth0 >/dev/null 2>&1; then
+        echo "[init] eth0 appeared after ${i} ticks"
+        break
+    fi
+    if [ "$i" = 50 ]; then
+        echo "[init] ERROR: eth0 never appeared"
+        poweroff -f
+    fi
+    sleep 0.1
+done
+
+echo "[init] configuring eth0 -> ${SQUIB_IP}"
+ip link set eth0 up
+ip addr add "${SQUIB_IP}/16" dev eth0
+# Direct route for the MMDS link-local IP. The interceptor sees ARP +
+# IPv4 frames for 169.254.169.254 regardless of the host network setup.
+ip route add 169.254.169.254/32 dev eth0
+
+# No artificial settle delay — virtio-net + the in-host MMDS
+# interceptor are synchronous, so wget can fire immediately.
+echo "[init] hitting MMDS at http://169.254.169.254${SQUIB_PATH}"
+echo "===SQUIB-DEMO==="
+
+# busybox wget. -q quiet, -O- to stdout. Connect timeout is 5s per
+# busybox default; the dumbo TCP stack should respond in <1ms.
+if wget -O- "http://169.254.169.254${SQUIB_PATH}"; then
+    echo
+    echo "===END==="
+    echo "[init] OK"
+else
+    echo
+    echo "===ERROR==="
+    echo "[init] MMDS request failed"
+fi
+
+# Flush PL011 then poweroff. PSCI SYSTEM_OFF (0x84000008) hands the
+# vCPU back to the squib runner, which decodes the HVC and shuts the
+# VM down cleanly.
+sync
+poweroff -f

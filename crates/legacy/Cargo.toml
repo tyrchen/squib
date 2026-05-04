@@ -1,0 +1,25 @@
+[package]
+name = "squib-legacy"
+description = "Legacy aarch64 platform devices for squib (PL011 UART)"
+categories = ["virtualization"]
+keywords = ["pl011", "uart", "aarch64", "virtualization"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+squib-arch = { workspace = true }
+squib-bus = { workspace = true }
+squib-gic = { workspace = true }
+
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -17,6 +17,16 @@ use applevisor::{
 use squib_arch::layout::{GICD_BASE, GICR_BASE};
 use thiserror::Error;
 
+/// Number of top-end SPI INTIDs squib reserves as the HVF MSI window.
+///
+/// HVF treats the MSI range as MSI-exclusive: any INTID inside it can only be
+/// triggered via `hv_gic_send_msi`. `hv_gic_set_spi` for those IDs returns
+/// `BAD_ARGUMENT`. Squib's legacy + virtio-MMIO devices use plain
+/// edge-triggered SPIs at low INTIDs (PL011=33, virtio slots start at 48), so
+/// the MSI window must sit *above* them. We park MSI at the top of the range —
+/// leaves the low ~900 INTIDs free for SPI use, which is plenty for a 1.0 VMM.
+const MSI_INTID_RESERVE: u32 = 64;
+
 /// Errors that can surface during HVF VM initialisation.
 #[derive(Debug, Error)]
 pub enum InitError {
@@ -98,9 +108,27 @@ impl HvfHypervisor {
             }
         }
 
+        // HVF's GIC interception only kicks in once *all three* base
+        // addresses are configured: distributor, redistributor, MSI
+        // region. Skipping MSI causes HVF to silently fall back to "GIC
+        // disabled" semantics — distributor/redistributor reads then
+        // miss stage-2 mappings and surface as data aborts to the host
+        // (PIDR2 reads at GICR+0xFFE8 read as zero, kernel panics with
+        // PSCI SYSTEM_RESET).
+        //
+        // We park MSI at `MSI_REGION_BASE` (squib_arch::layout) — below
+        // GICD, away from DRAM and the virtio MMIO band. The MSI
+        // interrupt range covers the full SPI window we negotiated with
+        // HVF (so guest-side virtio-MSI, when wired up later, has IDs
+        // to allocate from).
         let mut gic_cfg = GicConfig::new();
         gic_cfg.set_distributor_base(GICD_BASE)?;
         gic_cfg.set_redistributor_base(GICR_BASE)?;
+        gic_cfg.set_msi_region_base(squib_arch::layout::MSI_REGION_BASE)?;
+        let (spi_base, spi_count) = GicConfig::get_spi_interrupt_range()?;
+        let msi_count = spi_count.min(MSI_INTID_RESERVE);
+        let msi_base = spi_base + spi_count - msi_count;
+        gic_cfg.set_msi_interrupt_range(msi_base, msi_count)?;
 
         let vm_cfg = VirtualMachineConfig::new();
         VirtualMachineStaticInstance::init_with_gic(vm_cfg, gic_cfg)?;
@@ -144,15 +172,112 @@ pub struct MappedRegion {
     slot_index: usize,
 }
 
+/// Portable [`squib_core::GuestMemory`] view over an `applevisor::Memory`
+/// region. Constructed via [`HvfVm::first_region_as_guest_memory`]; held
+/// by virtio devices that need to read / write descriptor chains and
+/// payload buffers in guest memory.
+///
+/// Cloning is cheap (`Arc` clone). Reads / writes funnel through a
+/// per-region `parking_lot::Mutex` to keep `applevisor::Memory::write`'s
+/// `&mut self` requirement intact under concurrent device traffic.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub struct HvfGuestMemory {
+    inner: std::sync::Arc<parking_lot::Mutex<Memory>>,
+}
+
+// SAFETY: same rationale as the `Send`/`Sync` impls on `HvfVm` —
+// the underlying host buffer is shared memory; access is serialized
+// through `parking_lot::Mutex<Memory>`; the only non-Send token is the
+// `*const c_void` raw pointer inside `Memory`, which is sound to share
+// because the pointed-to memory is process-wide.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe impl Send for HvfGuestMemory {}
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe impl Sync for HvfGuestMemory {}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
+pub struct HvfGuestMemory;
+
+#[cfg(target_os = "macos")]
+impl squib_core::GuestMemory for HvfGuestMemory {
+    fn read(&self, addr: squib_core::GuestAddress, buf: &mut [u8]) -> squib_core::Result<()> {
+        let mem = self.inner.lock();
+        mem.read(addr.raw(), buf).map_err(|e| {
+            squib_core::Error::backend(format!(
+                "HvfGuestMemory::read({}, {} bytes): {e:?}",
+                addr,
+                buf.len()
+            ))
+        })
+    }
+
+    fn write(&self, addr: squib_core::GuestAddress, buf: &[u8]) -> squib_core::Result<()> {
+        let mut mem = self.inner.lock();
+        mem.write(addr.raw(), buf).map_err(|e| {
+            squib_core::Error::backend(format!(
+                "HvfGuestMemory::write({}, {} bytes): {e:?}",
+                addr,
+                buf.len()
+            ))
+        })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl squib_core::GuestMemory for HvfGuestMemory {
+    fn read(&self, _addr: squib_core::GuestAddress, _buf: &mut [u8]) -> squib_core::Result<()> {
+        Err(squib_core::Error::Unsupported("HvfGuestMemory needs macOS"))
+    }
+
+    fn write(&self, _addr: squib_core::GuestAddress, _buf: &[u8]) -> squib_core::Result<()> {
+        Err(squib_core::Error::Unsupported("HvfGuestMemory needs macOS"))
+    }
+}
+
 /// Live HVF VM handle. On non-macOS hosts this is a stub that holds no data.
+///
+/// Mappings are wrapped in `Arc<parking_lot::Mutex<Memory>>` so device
+/// threads can hold a shared handle to a region and read / write through
+/// the safe `applevisor::Memory::read` / `write` API without touching the
+/// raw host pointer. The outer mutex protects the mapping vector itself
+/// (rare insert at boot); the per-region inner mutex serializes
+/// concurrent device-thread access to a single region.
 #[derive(Debug)]
 pub struct HvfVm {
     #[cfg(target_os = "macos")]
     instance: VirtualMachineInstance<GicEnabled>,
     #[cfg(target_os = "macos")]
-    mappings: parking_lot::Mutex<Vec<Memory>>,
+    mappings: parking_lot::Mutex<Vec<std::sync::Arc<parking_lot::Mutex<Memory>>>>,
     vcpu_count: u32,
 }
+
+// SAFETY: `HvfVm` is conceptually a process-wide handle. The underlying
+// `applevisor::Memory` carries a raw `*const c_void` pointer to a host
+// allocation that is **shared across all threads** (it backs guest
+// physical memory mapped into the HVF stage-2 page tables). The pointer
+// itself is plain memory; it doesn't carry thread-local state. The
+// non-Sync interior (`Mutex<Vec<Memory>>`) is the only place that
+// mutates the mapping table, and we only call into it from the main
+// VMM thread (boot kernel/FDT writes) before the vCPU thread starts —
+// after that the mappings stay live for the lifetime of `HvfVm`. The
+// vCPU thread only needs `instance()` to call `vcpu_create()`, and
+// `VirtualMachineInstance<Gic>` is already trivially Send (only
+// `Option<Arc<()>>` + `PhantomData`). Sending an `Arc<HvfVm>` to the
+// vCPU thread therefore preserves all HVF safety contracts. See
+// [12-hvf-backend.md § 4](../../../specs/12-hvf-backend.md#4-threading-rules):
+// HVF allows arbitrary-thread access to VM-level handles; only the
+// per-vCPU calls are thread-affine, and `HvfVcpu` enforces that
+// separately via `check_affinity`.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe impl Send for HvfVm {}
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe impl Sync for HvfVm {}
 
 impl HvfVm {
     /// Number of vCPUs this VM was configured for.
@@ -182,12 +307,13 @@ impl HvfVm {
     ) -> Result<MappedRegion, InitError> {
         let mut mem = self.instance.memory_create(size_bytes)?;
         mem.map(guest_addr, perms)?;
+        let mut mappings = self.mappings.lock();
         let region = MappedRegion {
             guest_base: guest_addr,
             size: size_bytes,
-            slot_index: self.mappings.lock().len(),
+            slot_index: mappings.len(),
         };
-        self.mappings.lock().push(mem);
+        mappings.push(std::sync::Arc::new(parking_lot::Mutex::new(mem)));
         Ok(region)
     }
 
@@ -220,10 +346,12 @@ impl HvfVm {
         region_offset: usize,
         bytes: &[u8],
     ) -> Result<(), InitError> {
-        let mut mappings = self.mappings.lock();
-        let mem = mappings
-            .get_mut(region.slot_index)
-            .ok_or_else(|| InitError::Hvf(format!("no mapped region #{}", region.slot_index)))?;
+        let mappings = self.mappings.lock();
+        let mem_arc = mappings
+            .get(region.slot_index)
+            .ok_or_else(|| InitError::Hvf(format!("no mapped region #{}", region.slot_index)))?
+            .clone();
+        drop(mappings);
         let end = region_offset
             .checked_add(bytes.len())
             .filter(|end| *end <= region.size)
@@ -237,7 +365,7 @@ impl HvfVm {
             })?;
         let _ = end;
         let guest_addr = region.guest_base + region_offset as u64;
-        mem.write(guest_addr, bytes)?;
+        mem_arc.lock().write(guest_addr, bytes)?;
         Ok(())
     }
 
@@ -255,11 +383,80 @@ impl HvfVm {
         Err(InitError::UnsupportedHost)
     }
 
+    /// Convenience: write `bytes` at `offset` into the first mapped region.
+    ///
+    /// The boot path maps a single contiguous DRAM region first, so this
+    /// is the right primitive for kernel + FDT staging without exposing
+    /// a `MappedRegion` handle to the caller.
+    ///
+    /// # Errors
+    /// [`InitError::Hvf`] if no region is mapped or the write escapes
+    /// the region.
+    #[cfg(target_os = "macos")]
+    pub fn write_to_first_region(
+        &self,
+        region_offset: usize,
+        bytes: &[u8],
+    ) -> Result<(), InitError> {
+        let mappings = self.mappings.lock();
+        let mem_arc = mappings
+            .first()
+            .ok_or_else(|| InitError::Hvf("no regions mapped".to_string()))?
+            .clone();
+        drop(mappings);
+        let guest_addr = squib_arch::layout::DRAM_BASE + region_offset as u64;
+        mem_arc.lock().write(guest_addr, bytes)?;
+        Ok(())
+    }
+
+    /// Build a portable [`squib_core::GuestMemory`] handle backed by the
+    /// first mapped region.
+    ///
+    /// Devices (virtio frontends, the dumbo TCP server) consume guest
+    /// memory through this trait; calling them with the returned handle
+    /// gives them a clone-shareable, thread-safe view that funnels through
+    /// `applevisor::Memory::read` / `write` with a per-region mutex.
+    #[cfg(target_os = "macos")]
+    pub fn first_region_as_guest_memory(
+        &self,
+    ) -> Result<std::sync::Arc<HvfGuestMemory>, InitError> {
+        let mappings = self.mappings.lock();
+        let mem_arc = mappings
+            .first()
+            .ok_or_else(|| InitError::Hvf("no regions mapped".to_string()))?
+            .clone();
+        Ok(std::sync::Arc::new(HvfGuestMemory { inner: mem_arc }))
+    }
+
+    /// Stub for non-macOS hosts.
+    ///
+    /// # Errors
+    /// Always [`InitError::UnsupportedHost`].
+    #[cfg(not(target_os = "macos"))]
+    pub fn first_region_as_guest_memory(
+        &self,
+    ) -> Result<std::sync::Arc<HvfGuestMemory>, InitError> {
+        Err(InitError::UnsupportedHost)
+    }
+
+    /// Stub for non-macOS hosts.
+    ///
+    /// # Errors
+    /// Always [`InitError::UnsupportedHost`].
+    #[cfg(not(target_os = "macos"))]
+    pub fn write_to_first_region(
+        &self,
+        _region_offset: usize,
+        _bytes: &[u8],
+    ) -> Result<(), InitError> {
+        Err(InitError::UnsupportedHost)
+    }
+
     /// Borrow the underlying applevisor VM instance — used by [`crate::HvfVcpu`] to
     /// create vCPUs from their dedicated threads.
     #[cfg(target_os = "macos")]
     #[must_use]
-    pub(crate) fn instance(&self) -> &VirtualMachineInstance<GicEnabled> {
+    pub fn instance(&self) -> &VirtualMachineInstance<GicEnabled> {
         &self.instance
     }
 

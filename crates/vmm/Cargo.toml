@@ -21,17 +21,23 @@ applevisor = { workspace = true }
 [dependencies]
 parking_lot = { workspace = true }
 squib-arch = { workspace = true }
+squib-bus = { workspace = true }
 squib-core = { workspace = true }
 squib-fdt = { workspace = true }
 squib-gic = { workspace = true }
 squib-hv = { workspace = true }
+squib-legacy = { workspace = true }
 squib-loader = { workspace = true }
+squib-mmds = { workspace = true }
+squib-virtio = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [features]
 default = []

@@ -69,13 +69,13 @@ verify:
 # then re-invoke `cargo test` (which re-uses the signed binaries because nothing
 # changed). Requires `jq`.
 hvf-test:
-	@$(CARGO) test -p squib-hv --tests --no-run --quiet
-	@for bin in $$($(CARGO) test -p squib-hv --tests --no-run --message-format=json 2>/dev/null \
+	@$(CARGO) test -p squib-hv -p squib-vmm --tests --no-run --quiet
+	@for bin in $$($(CARGO) test -p squib-hv -p squib-vmm --tests --no-run --message-format=json 2>/dev/null \
 	                | jq -r 'select(.profile.test == true) | .filenames[]'); do \
 	    echo "signing $$bin"; \
 	    codesign --sign - --entitlements $(ENTITLEMENTS) --deep --force $$bin; \
 	done
-	@$(CARGO) test -p squib-hv --tests -- --nocapture
+	@$(CARGO) test -p squib-hv -p squib-vmm --tests -- --nocapture --include-ignored
 
 # Notarize the signed binary. Requires APPLE_ID, APPLE_TEAM_ID, and an app-specific
 # password in env (or use --keychain-profile if you've set one up).
@@ -96,4 +96,27 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test notarize release update-submodule
+# Build the reference VM (kernel + initramfs) one-time. Downloads the
+# Firecracker reference aarch64 vmlinux + a static busybox; produces
+# examples/reference-vm/build/{Image,initramfs.cpio.gz}. Skip if the
+# artifacts already exist.
+build-reference-vm:
+	@./examples/reference-vm/build.sh
+
+# End-to-end Linux boot demo: boots the reference VM under HVF, the
+# init script hits MMDS at 169.254.169.254, the response is captured
+# from PL011 and asserted by the test.
+#
+# Requires `make build-reference-vm` to have been run, plus the HVF
+# entitlement (codesigned automatically below).
+demo: build-reference-vm
+	@$(CARGO) test -p squib-vmm --test linux_boot_smoke --no-run --quiet
+	@for bin in $$($(CARGO) test -p squib-vmm --test linux_boot_smoke --no-run --message-format=json 2>/dev/null \
+	                | jq -r 'select(.profile.test == true) | .filenames[]'); do \
+	    echo "signing $$bin"; \
+	    codesign --sign - --entitlements $(ENTITLEMENTS) --deep --force $$bin; \
+	done
+	@$(CARGO) test -p squib-vmm --test linux_boot_smoke -- \
+	    --nocapture --include-ignored test_reference_vm_boots_linux_and_curls_mmds
+
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test build-reference-vm demo notarize release update-submodule

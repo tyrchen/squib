@@ -114,6 +114,13 @@ pub enum SnapshotError {
     /// Generic I/O error during state file read/write or fsync.
     #[error("snapshot I/O error: {0}")]
     Io(#[source] std::io::Error),
+
+    /// A host-side capture or restore step failed (HVF call returned an error,
+    /// MMDS handle was poisoned, etc.). The string is the underlying cause for
+    /// the `fault_message`; the variant exists to keep host-FFI failures out
+    /// of `Bitcode` and `Io` (both of which connote different remediations).
+    #[error("snapshot capture/restore failure: {0}")]
+    Capture(String),
 }
 
 impl SnapshotError {

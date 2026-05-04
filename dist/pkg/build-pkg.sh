@@ -57,11 +57,32 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 mkdir -p "$PKG_ROOT/usr/local/bin"
 mkdir -p "$PKG_ROOT/usr/local/share/squib"
+mkdir -p "$PKG_ROOT/usr/local/libexec/squib"
 
 cp "$SQUIB_BIN" "$PKG_ROOT/usr/local/bin/squib"
 cp "$SQUIB_JAIL_BIN" "$PKG_ROOT/usr/local/bin/squib-jail"
 cp apps/squib/squib.entitlements "$PKG_ROOT/usr/local/share/squib/"
 cp apps/squib/squib-bridged.entitlements "$PKG_ROOT/usr/local/share/squib/"
+
+# Stage the bundled gvproxy binary if it has been fetched + verified
+# (`make vendor-gvproxy`). The path is prescribed by
+# `specs/30-networking.md` § 4 (`<install-prefix>/libexec/squib/gvproxy`).
+# Soft-fail on a missing binary so the installer still ships when the
+# operator hasn't pinned a release yet — the warning surfaces in the
+# operator-visible build log so it's never silent.
+if [[ -f vendors/gvproxy/bin/gvproxy ]]; then
+    cp vendors/gvproxy/bin/gvproxy "$PKG_ROOT/usr/local/libexec/squib/gvproxy"
+    chmod 0755 "$PKG_ROOT/usr/local/libexec/squib/gvproxy"
+    if [[ -f vendors/gvproxy/bin/LICENSE ]]; then
+        mkdir -p "$PKG_ROOT/usr/local/share/squib/licenses"
+        cp vendors/gvproxy/bin/LICENSE \
+           "$PKG_ROOT/usr/local/share/squib/licenses/gvproxy.LICENSE"
+    fi
+else
+    echo "warning: vendors/gvproxy/bin/gvproxy missing — .pkg will not include" >&2
+    echo "         userspace networking. Run 'make vendor-gvproxy' first to" >&2
+    echo "         pin a release per vendors/gvproxy/MANIFEST.toml." >&2
+fi
 
 # Reset perms — pkgbuild bakes mode bits into the .pkg payload.
 chmod 0755 "$PKG_ROOT/usr/local/bin/squib"

@@ -197,11 +197,21 @@ impl MmdsInterceptor {
     }
 
     /// Drain any frames the interceptor wants delivered to the guest.
-    pub fn drain_rx(&self) -> Vec<Vec<u8>> {
+    ///
+    /// Returns refcounted [`bytes::Bytes`] handles per I-NET-4 — the caller
+    /// (virtio-net frontend) wraps each into a `Frame` without an extra
+    /// allocation. The pending-rx queue is internally `Vec<Vec<u8>>`
+    /// because the protocol parser ergonomics still benefit from a mutable
+    /// `Vec<u8>` while the response is being constructed; the freeze
+    /// happens on drain.
+    pub fn drain_rx(&self) -> Vec<bytes::Bytes> {
         // Make sure any TCP-side reply emitted asynchronously (e.g. by a
         // future timer-driven retransmit) is flushed first.
         self.flush_tcp_outbound();
         std::mem::take(&mut *self.inner.pending_rx.lock())
+            .into_iter()
+            .map(bytes::Bytes::from)
+            .collect()
     }
 
     /// Maximum length (in bytes) for an HTTP `path` accepted by

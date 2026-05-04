@@ -44,24 +44,24 @@ tokio = { version = "1.52", features = [
 
 # serialization
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.142"
+serde_json = "1.0.149"
 
 # observability
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = [
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = [
   "env-filter",
   "fmt",
   "json",
 ] }
 
 # CLI
-clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 
 # data
-bytes = "1.10"
+bytes = "1.11"
 parking_lot = "0.12"
 smallvec = { version = "1.15", features = ["serde", "union"] }
-arc-swap = "1.7"
+arc-swap = "1.9"
 
 
 # HTTP server (squib-api)
@@ -71,7 +71,7 @@ axum = { version = "0.8", default-features = false, features = [
   "matched-path",
   "tokio",
 ] }
-http = "1.3"
+http = "1.4"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["set-header", "trace", "limit"] }
@@ -114,9 +114,22 @@ libc = "0.2"
 # `vmnet.framework` consumes. Maintained by the objc2 ecosystem.
 block2 = "0.6"
 
+# Mach 3.0 syscall bindings. squib-host's `pager-live-mach` feature uses these
+# to install a process-level exception port and serve `MACH_RCV_MSG` for
+# postcopy lazy-fault-in. Pinned to 0.6 because the 0.4 series is missing the
+# `task_swap_exception_ports` / `task_get_exception_ports` bindings squib needs.
+mach2 = "0.6.0"
+
 # URL-safe base64 (no padding). Used by squib-mmds for the V2 token wire form
 # and by future consumers needing RFC-4648 § 5 encodings.
 base64 = { version = "0.22", default-features = false, features = ["std"] }
+
+# RFC-4122 UUIDs. squib-net uses `Uuid::new_v5` over a name-spaced derivation
+# of `iface_id` for the vmnet `interface_id_key`; squib-host's `pager-live-mach`
+# feature uses `Uuid::new_v4` for the postcopy snapshot identifier passed to
+# the launcher. Pulling in `uuid` is one workspace dep with two consumers, so
+# the `61-crates-and-features.md § 4` "wait for a second consumer" gate is met.
+uuid = { version = "1", default-features = false, features = ["v5", "std"] }
 
 # benchmarking
 criterion = { version = "0.8", default-features = false, features = [
@@ -124,7 +137,7 @@ criterion = { version = "0.8", default-features = false, features = [
 ] }
 
 # test scaffolding — atomic-rename and pager tests need throwaway files
-tempfile = "3.14"
+tempfile = "3.27"
 
 # workspace crates
 squib-core = { path = "crates/core" }

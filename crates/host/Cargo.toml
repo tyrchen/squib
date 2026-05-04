@@ -15,6 +15,14 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Enables the live `mach_msg(MACH_RCV_MSG)` server in `pager::mach_imp`. Off by
+# default because installing a process-level exception port requires the
+# operator to understand they're hijacking the macOS exception delivery path —
+# unprivileged unit-test runs default to the skeleton (drift-poll only) shape.
+pager-live-mach = ["dep:mach2"]
+
 [dependencies]
 squib-snapshot = { workspace = true }
 
@@ -25,6 +33,9 @@ tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+# Live Mach exception-port server. Optional — enabled via the
+# `pager-live-mach` feature.
+mach2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

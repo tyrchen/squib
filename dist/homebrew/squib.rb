@@ -25,6 +25,16 @@ class Squib < Formula
   depends_on arch: :arm64    # Apple Silicon only. See R10.
   depends_on "rust" => :build
 
+  # gvproxy — vendored upstream binary for `--network=userspace`. The version
+  # and SHA-256 must be kept in sync with `vendors/gvproxy/MANIFEST.toml`; the
+  # `make vendor-gvproxy` target reads the manifest, this Ruby block reads the
+  # same numbers (Homebrew's `resource` doesn't share state with arbitrary
+  # files, so the pin lives twice — bump both together as part of release prep).
+  resource "gvproxy" do
+    url "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.7/gvproxy-darwin"
+    sha256 "PLACEHOLDER_PIN_AT_RELEASE_PREP_TIME"
+  end
+
   def install
     # Build both release binaries. The workspace is configured for
     # `aarch64-apple-darwin` via `.cargo/config.toml`, so the standard
@@ -44,6 +54,16 @@ class Squib < Formula
     (share/"squib").install "apps/squib/squib.entitlements"
     (share/"squib").install "apps/squib/squib-bridged.entitlements"
     (share/"squib").install "apps/squib-jail/squib-jail.entitlements"
+
+    # Install the bundled `gvproxy` binary at the canonical path squib
+    # looks at by default (`--network=userspace` resolves through
+    # `<libexec>/squib/gvproxy`). Homebrew exposes `libexec` as the
+    # cellar-relative path; squib's runtime env lookup falls back to
+    # `/usr/local/libexec/squib/gvproxy` for non-brew installs (.pkg).
+    resource("gvproxy").stage do
+      (libexec/"squib").install Dir["gvproxy-darwin"].first => "gvproxy"
+      chmod 0755, libexec/"squib/gvproxy"
+    end
 
     # Ad-hoc codesign so a freshly-built binary can request HVF on first
     # run. Users who want the notarized release should grab the .pkg from
@@ -68,6 +88,14 @@ class Squib < Formula
       after rebuilding with `--features bridged`. The notarized .pkg
       shipped on the GitHub Releases page already does this for the
       `squib-bridged` variant.
+
+      The bundled `gvproxy` (Apache-2.0; vendored from
+      `containers/gvisor-tap-vsock`) is installed at:
+
+        #{HOMEBREW_PREFIX}/libexec/squib/gvproxy
+
+      which `squib --network=userspace` resolves automatically. Override
+      with `--gvproxy-path` or `SQUIB_GVPROXY_PATH` if needed.
     EOS
   end
 

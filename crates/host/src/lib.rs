@@ -25,8 +25,10 @@
 // guarantee lives in `host_page_size`; truncation is impossible.
 #![allow(clippy::cast_possible_truncation)]
 
+pub mod block_io;
 pub mod pager;
 
+pub use block_io::set_f_nocache;
 pub use pager::{
     FilePageSource, PageRequest, PageSource, PageSourceError, Pager, PagerConfig, PagerError,
     PagerStats, PagerStatsSnapshot, PrewarmList, UffdPageSource, host_page_size, spawn_mach_server,

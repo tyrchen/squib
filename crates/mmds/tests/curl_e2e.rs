@@ -50,7 +50,11 @@ impl GuestStub {
     /// Drain whatever frames the interceptor has for us, asserting
     /// each one is well-formed Ethernet and returning the payloads.
     fn drain(&mut self) -> Vec<Vec<u8>> {
-        self.interceptor.drain_rx()
+        self.interceptor
+            .drain_rx()
+            .into_iter()
+            .map(|b| b.to_vec())
+            .collect()
     }
 
     /// Send an ARP request for the MMDS IP. The interceptor should

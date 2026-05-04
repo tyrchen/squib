@@ -31,12 +31,18 @@
 // our docs; backticking each adds noise.
 #![allow(clippy::doc_markdown)]
 
+pub mod hotplug;
 pub mod irq;
 pub mod run_loop;
 pub mod vcpu;
+#[cfg(target_os = "macos")]
+pub mod vcpu_save;
 pub mod vmm;
 
+pub use hotplug::HvfMemBackend;
 pub use irq::{IrqShadow, MAX_TRACKED_INTID};
 pub use run_loop::{Exit, RunLoopDispatch, decode_exception};
 pub use vcpu::{HvfVcpu, ThreadAffinityError};
+#[cfg(target_os = "macos")]
+pub use vcpu_save::{HvfGicSnapshot, HvfVcpuSnapshot, InProcMmdsSnapshot};
 pub use vmm::{HvfGuestMemory, HvfHypervisor, HvfVm, InitError, MappedRegion};

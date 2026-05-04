@@ -153,6 +153,14 @@ vmnet-test:
 # RAM disk and asserts that `save` rejects when the destination crosses
 # filesystems. The test is `#[ignore]`'d in plain `cargo test` because it
 # needs hdiutil + an ephemeral mount; this target opts in.
+# Fetch the pinned `gvproxy` binary into `vendors/gvproxy/bin/` per
+# `vendors/gvproxy/MANIFEST.toml`. The .pkg + Homebrew flows pick the
+# binary up from there if it exists; missing it is a soft-fail (the
+# bundled installer ships without `--network=userspace` support, all
+# other modes still work). Idempotent.
+vendor-gvproxy:
+	@./vendors/gvproxy/fetch.sh
+
 snapshot-cross-fs-test:
 	@$(CARGO) test -p squib-snapshot --test integration -- --ignored \
 	  cross_filesystem_save_rejects_when_dest_is_on_a_separate_ramdisk
@@ -183,7 +191,7 @@ snapshot-smoke:
 # .pkg installable but not notarizable.
 PKG_OUT := $(TARGET_DIR)/aarch64-apple-darwin/release/squib-$(shell $(CARGO) metadata --format-version 1 --no-deps | jq -r '.packages[0].version').pkg
 
-pkg: sign-all
+pkg: sign-all vendor-gvproxy
 	@SIGN_ID=$(SIGN_ID) ./dist/pkg/build-pkg.sh
 
 # Notarize the signed installer .pkg. Implements the Phase 6 exit criterion
@@ -304,4 +312,4 @@ soak:
 	done; \
 	exit $$fail
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged sign-jail sign-all verify verify-squib verify-jail verify-jail-preserves-entitlements hvf-test vmnet-test snapshot-smoke build-reference-vm demo notarize release update-submodule pkg homebrew-formula compat-test bench-publish soak
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged sign-jail sign-all verify verify-squib verify-jail verify-jail-preserves-entitlements hvf-test vmnet-test snapshot-smoke snapshot-cross-fs-test vendor-gvproxy build-reference-vm demo notarize release update-submodule pkg homebrew-formula compat-test bench-publish soak

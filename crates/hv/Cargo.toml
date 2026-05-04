@@ -25,5 +25,18 @@ squib-gic = { workspace = true }
 parking_lot = { workspace = true }
 squib-arch = { workspace = true }
 squib-core = { workspace = true }
+# `squib-hv::HvfMemBackend` implements `squib_virtio::devices::mem::MemHotplugBackend`
+# so the device can drive live HVF stage-2 mutations on plug/unplug. The
+# direction of the dep — virtio trait → hv impl — keeps the trait surface
+# in the device crate (where it belongs) and the live binding next to the
+# rest of the HVF wrappers.
+squib-virtio = { workspace = true }
+# `squib-hv::vcpu_save` implements the portable
+# `squib_snapshot::vcpu_save::{VcpuSnapshotSource, VcpuRestoreTarget,
+# GicSnapshotSource, GicRestoreTarget}` traits over `applevisor::Vcpu` and
+# `applevisor::gic::GicState`. The traits live in `squib-snapshot` so the
+# snapshot crate doesn't depend on `applevisor`; the binding lives here
+# (the `squib-hv` crate is the one allowed to link `applevisor`).
+squib-snapshot = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

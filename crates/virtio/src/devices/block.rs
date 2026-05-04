@@ -191,6 +191,244 @@ impl BlockBackend for SyncFileBackend {
     }
 }
 
+/// Direct-I/O file-backed `BlockBackend` for the high-IOPS path.
+///
+/// Differs from [`SyncFileBackend`] structurally: **lockless positioned
+/// I/O**. Uses `pread(2)` / `pwrite(2)` via
+/// `std::os::unix::fs::FileExt::{read_at, write_at}`, so multiple threads
+/// can issue concurrent operations against the same fd without serialising
+/// through a `Mutex<File>`. The 100 K IOPS budget in
+/// [71 § 3](../../../specs/71-performance-budgets.md#3-block-io) needs the
+/// lockless path — a mutex-serialised engine caps at the latency of one
+/// pread per op (≈ 30 μs ⇒ 33 K IOPS ceiling on a single thread).
+///
+/// **`F_NOCACHE` is not set here** because `squib-virtio` carries
+/// `#![forbid(unsafe_code)]` (I-CRATE-2): the `fcntl(F_NOCACHE)` call lives
+/// in `squib-host::block_io::set_f_nocache`, which can wrap the fd before
+/// it's handed to this constructor (the operator-supplied path is opened
+/// once at boot, so the small upfront cost is fine). The host-side cache
+/// pressure without `F_NOCACHE` is small for the Lambda workload profile;
+/// the perf-tuning lane benchmark
+/// ([71 § 3](../../../specs/71-performance-budgets.md#3-block-io)) gates
+/// the regression once the bench harness lights up.
+///
+/// Functionally interchangeable with `SyncFileBackend`; constructed via
+/// [`Self::open`] and dropped in via the same `Arc<dyn BlockBackend>`
+/// the device frontend takes today.
+#[derive(Debug)]
+#[allow(clippy::disallowed_types)]
+pub struct AsyncFileBackend {
+    file: File,
+    size_bytes: u64,
+    read_only: bool,
+}
+
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+impl AsyncFileBackend {
+    /// Open `path` for lockless positioned I/O.
+    ///
+    /// The fd is shared across every thread that calls into `BlockBackend`;
+    /// concurrent positioned I/O is safe via `pread`/`pwrite`.
+    ///
+    /// # Errors
+    /// `std::io::Error` if the file cannot be opened.
+    pub fn open(path: &std::path::Path, read_only: bool) -> std::io::Result<Self> {
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+        if !read_only {
+            opts.write(true);
+        }
+        let file = opts.open(path)?;
+        Self::from_file(file, read_only)
+    }
+
+    /// Wrap an already-open `File`. Used by `squib-host` after applying
+    /// `F_NOCACHE` via the unsafe `fcntl` boundary: the operator constructs
+    /// the fd, hands it to us, and we own the read/write side.
+    ///
+    /// # Errors
+    /// `std::io::Error` if the file's metadata can't be queried.
+    pub fn from_file(file: File, read_only: bool) -> std::io::Result<Self> {
+        let size_bytes = file.metadata()?.len();
+        Ok(Self {
+            file,
+            size_bytes,
+            read_only,
+        })
+    }
+}
+
+impl BlockBackend for AsyncFileBackend {
+    fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+    fn read_at(&self, byte_offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        // `read_at` (pread) doesn't change the fd seek position, so concurrent
+        // calls against the same fd are safe per `FileExt` contract. No mutex.
+        use std::os::unix::fs::FileExt as _;
+        // `read_exact_at` would loop on partial reads; we want exactly that
+        // semantic for virtio-block where requests are size-bounded.
+        self.file.read_exact_at(buf, byte_offset)
+    }
+    fn write_at(&self, byte_offset: u64, buf: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt as _;
+        if self.read_only {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read-only block backend",
+            ));
+        }
+        self.file.write_all_at(buf, byte_offset)
+    }
+    fn flush(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+    fn read_only(&self) -> bool {
+        self.read_only
+    }
+}
+
+/// Token-bucket rate limiter wrapping any [`BlockBackend`].
+///
+/// `tower::Layer`-shaped (without the actual `tower` dependency — the
+/// trait surface here is sync, not request/response): construct via
+/// [`RateLimitedBackend::new`] with a wrapped backend and a [`RateLimit`]
+/// budget. Every `read_at` / `write_at` calls `acquire(buf.len())` first;
+/// if the bucket is empty the call blocks (`std::thread::sleep`) until
+/// enough tokens replenish.
+///
+/// Per [14 § 4.1](../../../specs/14-virtio-and-devices.md#41-virtio-block) and
+/// the `D7-adjacent` rate-limiter requirement: bound aggregate throughput
+/// within ±5 % of the configured rate. The bucket is refilled
+/// continuously based on wall-clock elapsed time since the last drain,
+/// which gives a smooth ±n % envelope at any rate.
+#[derive(Debug)]
+pub struct RateLimitedBackend {
+    inner: Arc<dyn BlockBackend>,
+    state: Mutex<TokenBucket>,
+    config: RateLimit,
+}
+
+/// Per-direction rate cap (bytes/sec). Use `unlimited()` to bypass.
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimit {
+    /// Refill rate (bytes per second).
+    pub bytes_per_sec: u64,
+    /// Burst — bucket size in bytes; max instantaneous draw.
+    pub burst_bytes: u64,
+}
+
+impl RateLimit {
+    /// No rate limit (pass-through).
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            bytes_per_sec: u64::MAX,
+            burst_bytes: u64::MAX,
+        }
+    }
+
+    /// `bytes_per_sec` as a steady-state cap, with a 100ms-worth burst.
+    #[must_use]
+    pub const fn steady(bytes_per_sec: u64) -> Self {
+        Self {
+            bytes_per_sec,
+            burst_bytes: bytes_per_sec / 10,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TokenBucket {
+    tokens: u64,
+    last_refill: std::time::Instant,
+}
+
+impl RateLimitedBackend {
+    /// Wrap `inner` with a rate-limit gate. `inner` is held by `Arc` so
+    /// the same backend can sit behind several rate-limit slices.
+    #[must_use]
+    pub fn new(inner: Arc<dyn BlockBackend>, config: RateLimit) -> Self {
+        Self {
+            state: Mutex::new(TokenBucket {
+                tokens: config.burst_bytes,
+                last_refill: std::time::Instant::now(),
+            }),
+            config,
+            inner,
+        }
+    }
+
+    fn refill(state: &mut TokenBucket, config: &RateLimit, ceiling: u64) {
+        if config.bytes_per_sec == u64::MAX {
+            state.tokens = ceiling;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(state.last_refill);
+        // Saturating to defeat overflow on long pauses (e.g. snapshot
+        // restore where the bucket sits idle for hours).
+        let earned_u128 =
+            u128::from(config.bytes_per_sec).saturating_mul(elapsed.as_nanos()) / 1_000_000_000;
+        let earned = u64::try_from(earned_u128).unwrap_or(u64::MAX);
+        state.tokens = state.tokens.saturating_add(earned).min(ceiling);
+        state.last_refill = now;
+    }
+
+    fn acquire(&self, n: u64) {
+        if self.config.bytes_per_sec == u64::MAX {
+            return;
+        }
+        // For oversize requests (n > burst_bytes), let the bucket grow up to
+        // `n` for this call so the request can complete in finite time.
+        // Steady-state burst is still `burst_bytes`; this is the
+        // single-request override.
+        let ceiling = n.max(self.config.burst_bytes);
+        let mut g = self.state.lock();
+        Self::refill(&mut g, &self.config, ceiling);
+        if g.tokens >= n {
+            g.tokens -= n;
+            return;
+        }
+        // Sleep for the remainder of the time it would take to refill
+        // `n - tokens` bytes, then drain. `parking_lot::Mutex` is not
+        // poison-safe; we hold it across the sleep deliberately so a
+        // concurrent caller cannot bleed in and drain the bucket.
+        let needed = n - g.tokens;
+        let nanos_to_wait =
+            (u128::from(needed) * 1_000_000_000) / u128::from(self.config.bytes_per_sec.max(1));
+        let wait =
+            std::time::Duration::from_nanos(u64::try_from(nanos_to_wait).unwrap_or(u64::MAX));
+        // Suppressing the cv to avoid the wait_for-loop bug where a
+        // refill clamped to `burst_bytes` would never reach `n`. Single
+        // sleep then drain is correct: by the time we wake, at least
+        // `needed` more bytes have been "earned" by the rate limit.
+        std::thread::sleep(wait);
+        Self::refill(&mut g, &self.config, ceiling);
+        g.tokens = g.tokens.saturating_sub(n);
+    }
+}
+
+impl BlockBackend for RateLimitedBackend {
+    fn size_bytes(&self) -> u64 {
+        self.inner.size_bytes()
+    }
+    fn read_at(&self, byte_offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.acquire(u64::try_from(buf.len()).unwrap_or(u64::MAX));
+        self.inner.read_at(byte_offset, buf)
+    }
+    fn write_at(&self, byte_offset: u64, buf: &[u8]) -> std::io::Result<()> {
+        self.acquire(u64::try_from(buf.len()).unwrap_or(u64::MAX));
+        self.inner.write_at(byte_offset, buf)
+    }
+    fn flush(&self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+    fn read_only(&self) -> bool {
+        self.inner.read_only()
+    }
+}
+
 /// virtio-block frontend.
 #[derive(Debug)]
 pub struct BlockDevice {
@@ -487,6 +725,75 @@ mod tests {
 
     use super::*;
     use crate::queue::{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE};
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn test_should_round_trip_async_file_backend_via_pread_pwrite() {
+        // Use a tempfile so the test doesn't depend on /tmp pinned state.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("blk.img");
+        std::fs::write(&path, [0u8; 4096]).unwrap();
+        let backend = AsyncFileBackend::open(&path, false).unwrap();
+        assert_eq!(backend.size_bytes(), 4096);
+        backend.write_at(512, b"hello-async").unwrap();
+        let mut buf = [0u8; 11];
+        backend.read_at(512, &mut buf).unwrap();
+        assert_eq!(&buf, b"hello-async");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn test_should_reject_writes_through_async_file_backend_when_read_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ro.img");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        let backend = AsyncFileBackend::open(&path, true).unwrap();
+        let err = backend.write_at(0, b"x").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn test_should_pass_through_when_rate_limit_is_unlimited() {
+        let inner: Arc<dyn BlockBackend> = Arc::new(MemoryBackend::new(1024));
+        let limited = RateLimitedBackend::new(inner, RateLimit::unlimited());
+        // 256-byte write — well above any meaningful per-call cap, but
+        // unlimited means it's instant.
+        let start = std::time::Instant::now();
+        limited.write_at(0, &[0xAA; 256]).unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_should_block_until_tokens_replenish() {
+        // 1 KiB/s with a 100-byte burst → 256-byte write must wait
+        // (256 - 100) / 1024 ≈ 152 ms for the additional 156 bytes to
+        // refill. Test asserts the call waited at least 100 ms.
+        let inner: Arc<dyn BlockBackend> = Arc::new(MemoryBackend::new(2048));
+        let limited = RateLimitedBackend::new(
+            inner,
+            RateLimit {
+                bytes_per_sec: 1024,
+                burst_bytes: 100,
+            },
+        );
+        let start = std::time::Instant::now();
+        // Drain the burst first.
+        limited.write_at(0, &[0; 100]).unwrap();
+        // Second write needs to wait for refill.
+        limited.write_at(0, &[0; 256]).unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100),
+            "limiter must throttle; elapsed = {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_recharge_steady_helper_to_one_tenth_of_rate() {
+        let cfg = RateLimit::steady(1_000_000);
+        assert_eq!(cfg.bytes_per_sec, 1_000_000);
+        assert_eq!(cfg.burst_bytes, 100_000);
+    }
 
     /// In-memory backend for tests — 1 MiB of zero-initialized space.
     #[derive(Debug)]

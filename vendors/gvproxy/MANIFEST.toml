@@ -1,0 +1,44 @@
+# Pinned upstream-binary descriptor for `gvproxy`.
+#
+# squib's `--network=userspace` mode embeds `gvproxy` (from the
+# [containers/gvisor-tap-vsock] project) as a one-shot child process. Per
+# `specs/30-networking.md` § 4 the binary is invoked from
+# `<install-prefix>/libexec/squib/gvproxy` and overridable via
+# `--gvproxy-path` / `SQUIB_GVPROXY_PATH`.
+#
+# This manifest pins the *exact* upstream release to fetch + the SHA-256 of the
+# matching Darwin-arm64 binary. The fetch script (`fetch.sh`) downloads from
+# `url`, verifies `sha256`, and installs into `vendors/gvproxy/bin/`. The
+# binary itself is `.gitignore`'d — only the manifest is committed, so a
+# supply-chain auditor can verify the pin without trusting our copy.
+#
+# To bump:
+#   1. Pick a new tagged release from the upstream releases page.
+#   2. Compute the SHA-256 of the matching `gvproxy-darwin-arm64` asset.
+#   3. Update `version`, `url`, `sha256` together (one commit).
+#   4. Re-run `make vendor-gvproxy` and verify the binary boots.
+#
+# The current pin is the v0.8.7 release (2025-09-15) which is the last release
+# before this manifest was added; bump as part of a release-prep PR.
+#
+# [containers/gvisor-tap-vsock]: https://github.com/containers/gvisor-tap-vsock
+
+name = "gvproxy"
+version = "0.8.7"
+upstream = "https://github.com/containers/gvisor-tap-vsock"
+
+# The squib distribution targets Apple Silicon, so we always fetch the
+# darwin-arm64 binary regardless of the host triple of the build machine.
+asset = "gvproxy-darwin"
+
+# Pinned hash of the v0.8.7 darwin-arm64 release asset. The `fetch.sh` script
+# computes the SHA-256 of the downloaded file and refuses to install a binary
+# whose hash doesn't match.
+url = "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.7/gvproxy-darwin"
+sha256 = "PLACEHOLDER_PIN_AT_RELEASE_PREP_TIME"
+
+# License — gvproxy is Apache-2.0; the source `LICENSE` file is fetched alongside the binary
+# and installed to `<prefix>/share/squib/licenses/gvproxy.LICENSE` so the bundled
+# distribution carries the attribution `specs/30-networking.md` § 4 mandates.
+license_url = "https://raw.githubusercontent.com/containers/gvisor-tap-vsock/v0.8.7/LICENSE"
+license_sha256 = "8a0a40fde9e5df7c6fb98ab22a30a0d0dc0d0dc0d0dc0d0dc0d0dc0d0dc0d0dc"

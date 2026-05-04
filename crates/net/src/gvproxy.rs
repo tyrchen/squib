@@ -268,7 +268,7 @@ async fn run_reader(
             debug!(error = %err, "gvproxy reader: body read failed");
             return;
         }
-        let frame = Frame { bytes: buf };
+        let frame = Frame::from_bytes(bytes::Bytes::from(buf));
         let mut guard = rx_buffer.lock();
         if guard.len() >= RX_QUEUE_CAP {
             guard.remove(0);
@@ -435,12 +435,7 @@ mod tests {
         });
 
         // Host → "gvproxy": send a frame and observe it on the child side.
-        tx_tx
-            .send(Frame {
-                bytes: b"helloeth0".to_vec(),
-            })
-            .await
-            .unwrap();
+        tx_tx.send(Frame::from_slice(b"helloeth0")).await.unwrap();
         let mut hdr = [0u8; 4];
         child.read_exact(&mut hdr).await.unwrap();
         assert_eq!(u32::from_be_bytes(hdr), b"helloeth0".len() as u32);
@@ -462,6 +457,6 @@ mod tests {
         }
         let frames = std::mem::take(&mut *rx_buffer.lock());
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].bytes, body);
+        assert_eq!(frames[0].bytes.as_ref(), body);
     }
 }

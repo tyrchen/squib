@@ -67,7 +67,7 @@ impl VmnetHostBackend {
         }
         let pending: Vec<Frame> = std::mem::take(&mut *guard);
         drop(guard);
-        let slices: Vec<&[u8]> = pending.iter().map(|f| f.bytes.as_slice()).collect();
+        let slices: Vec<&[u8]> = pending.iter().map(|f| f.bytes.as_ref()).collect();
         for chunk in slices.chunks(crate::iface::BATCH) {
             self.iface.write(chunk)?;
         }
@@ -109,7 +109,7 @@ impl NetBackend for VmnetHostBackend {
         for (i, mut buf) in storage.into_iter().enumerate().take(n) {
             let len = sizes[i].min(buf.len());
             buf.truncate(len);
-            frames.push(Frame { bytes: buf });
+            frames.push(Frame::from_bytes(bytes::Bytes::from(buf)));
         }
         frames
     }
@@ -173,6 +173,6 @@ mod tests {
         backend.send(&Frame::from_slice(b"hello"));
         let got = backend.recv();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].bytes, b"hello");
+        assert_eq!(got[0].bytes.as_ref(), b"hello");
     }
 }

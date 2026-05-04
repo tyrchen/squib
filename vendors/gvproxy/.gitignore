@@ -1,0 +1,3 @@
+# The fetched binary and license are reproducible from the pinned
+# `MANIFEST.toml` via `fetch.sh`; only the manifest is checked in.
+bin/

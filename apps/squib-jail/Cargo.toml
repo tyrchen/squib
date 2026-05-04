@@ -39,7 +39,7 @@ tracing = { workspace = true }
 # of warning-level lines, so the workspace `tracing-subscriber` JSON / ANSI
 # / chrono features are pure binary bloat. Override to the smallest feature
 # set that keeps env-filter + the human-readable formatter we use.
-tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
   "env-filter",
   "fmt",
 ] }

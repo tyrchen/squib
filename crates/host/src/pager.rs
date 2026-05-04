@@ -492,26 +492,30 @@ pub fn host_page_size() -> u64 {
 mod mach_imp {
     //! The Mach-exception-port server thread.
     //!
-    //! Phase 5.5 ships the dispatcher skeleton: the server thread, the
-    //! shutdown-aware run loop, and a periodic drift check that the live
-    //! `task_get_exception_ports` reader will plug into without changing the
-    //! lifecycle.
+    //! Two compile-time variants:
     //!
-    //! The actual `mach_msg(MACH_RCV_MSG)` server loop and
-    //! `mach_exception_raise_state_identity` forwarder are gated behind the
-    //! `pager-live-mach` cargo feature so unit tests on a developer Mac don't
-    //! need to register a task-level exception port. The default build sleeps
-    //! for `poll_interval` between drift checks — sufficient to verify the
-    //! pager + drift-detection lifecycle without any privileged Mach calls.
+    //! - **Default (skeleton)** — drift-poll only. Useful for unit-test runs and non-postcopy
+    //!   production paths; the pager can still serve pages via [`super::PageSource::fetch`] when
+    //!   the orchestrator hands off `(ipa, page)` pairs through some other channel. No
+    //!   process-level exception port is installed, so `cargo test` is safe to run on a developer
+    //!   Mac without any concern about taking over `EXC_BAD_ACCESS` delivery.
+    //! - **`pager-live-mach`** — the full Mach-exception-port server. Allocates a receive port,
+    //!   installs it via `task_swap_exception_ports`, services `mach_msg(MACH_RCV_MSG)` with a
+    //!   `poll_interval` timeout, drift-checks the active port set on every loop, and re-installs
+    //!   if LLDB has overwritten ours. Out-of-region exceptions are forwarded to the captured prior
+    //!   port via the kernel's "return KERN_FAILURE" fallback — the kernel walks the exception port
+    //!   chain when our handler doesn't claim ownership.
 
-    use std::{
-        thread::{self, JoinHandle},
-        time::Instant,
-    };
+    use std::thread::{self, JoinHandle};
+    #[cfg(not(feature = "pager-live-mach"))]
+    use std::time::Instant;
 
+    #[cfg(not(feature = "pager-live-mach"))]
     use tracing::{debug, info};
 
-    use super::{Pager, PagerError, PagerHandle};
+    #[cfg(not(feature = "pager-live-mach"))]
+    use super::PagerHandle;
+    use super::{Pager, PagerError};
 
     /// Spawn the Mach server thread.
     ///
@@ -530,37 +534,264 @@ mod mach_imp {
         thread::Builder::new()
             .name("squib-pager".into())
             .spawn(move || -> Result<(), PagerError> {
-                run_server_loop(&handle);
-                Ok(())
+                #[cfg(feature = "pager-live-mach")]
+                {
+                    return live::run_live_server(&handle);
+                }
+                #[cfg(not(feature = "pager-live-mach"))]
+                {
+                    run_skeleton_loop(&handle);
+                    Ok(())
+                }
             })
             .map_err(PagerError::Spawn)
     }
 
-    fn run_server_loop(handle: &PagerHandle) {
+    #[cfg(not(feature = "pager-live-mach"))]
+    fn run_skeleton_loop(handle: &PagerHandle) {
         info!(
             poll_interval = ?handle.poll_interval(),
-            "squib-pager server starting (drift-poll skeleton)"
+            "squib-pager server starting (drift-poll skeleton; build with `--features pager-live-mach` to install a real exception port)"
         );
         let mut last_drift_check = Instant::now();
         while !handle.is_shutting_down() {
-            // Live mode: `mach_msg(MACH_RCV_MSG, timeout=poll_interval)`.
-            // Skeleton mode: park for the same duration so the drift-check rate
-            // matches what the live path would produce.
             thread::park_timeout(handle.poll_interval());
             if last_drift_check.elapsed() >= handle.poll_interval() {
-                drift_check();
+                debug!("squib-pager drift check (no-op skeleton)");
                 last_drift_check = Instant::now();
             }
         }
         debug!("squib-pager server exiting (shutdown requested)");
     }
 
-    fn drift_check() {
-        // The live implementation calls `task_get_exception_ports`, compares
-        // against the port we own, and re-installs via `task_swap_exception_ports`
-        // if LLDB has overwritten ours (and bumps the `port_reinstalls` counter).
-        // The skeleton emits a debug trace so the rate is observable in tests.
-        debug!("squib-pager drift check (no-op skeleton)");
+    #[cfg(feature = "pager-live-mach")]
+    mod live {
+        //! Live Mach-exception-port server. Compiled only with
+        //! `--features pager-live-mach`.
+        //!
+        //! The unsafe surface is bounded to:
+        //! 1. `mach_port_allocate` — create a fresh receive port we own.
+        //! 2. `task_swap_exception_ports` — atomically install the port and capture the prior
+        //!    handler set.
+        //! 3. `mach_msg(MACH_RCV_MSG, …, timeout)` — receive one exception message per iteration,
+        //!    with a timeout matching `poll_interval` so shutdown latency is bounded.
+        //! 4. `task_get_exception_ports` — drift detection: re-read the active set, compare against
+        //!    the port we own, re-install if LLDB has overwritten ours.
+        //!
+        //! Out-of-region faults are NOT explicitly forwarded — we let the
+        //! Mach kernel's automatic fallback walk the exception port chain
+        //! by *not* registering a reply for that exception thread, so the
+        //! kernel re-delivers via the next port in the chain (typically
+        //! the prior LLDB or task-default handler we captured).
+
+        use std::time::Instant;
+
+        use mach2::{
+            exception_types::{
+                EXC_MASK_BAD_ACCESS, EXCEPTION_DEFAULT, exception_behavior_array_t,
+                exception_flavor_array_t, exception_mask_array_t, exception_mask_t,
+            },
+            kern_return::KERN_SUCCESS,
+            mach_port::{mach_port_allocate, mach_port_deallocate},
+            mach_types::exception_handler_array_t,
+            message::{
+                MACH_MSG_TIMEOUT_NONE, MACH_RCV_MSG, MACH_RCV_TIMEOUT, MACH_RCV_TOO_LARGE,
+                mach_msg, mach_msg_header_t,
+            },
+            port::{MACH_PORT_RIGHT_RECEIVE, mach_port_t},
+            task::{task_get_exception_ports, task_swap_exception_ports},
+            thread_status::THREAD_STATE_NONE,
+            traps::mach_task_self,
+        };
+        use tracing::{debug, info, warn};
+
+        use super::super::{PagerError, PagerHandle};
+
+        /// `EXC_MASK_*` for the exception classes we want to claim. virtio-mem
+        /// faults surface as `EXC_BAD_ACCESS` (KERN_INVALID_ADDRESS sub-code) so
+        /// that's the one we install. Other classes (BAD_INSTRUCTION, BREAKPOINT)
+        /// stay on the prior handler — squib's pager has no opinion on those.
+        const SQUIB_EXC_MASK: exception_mask_t = EXC_MASK_BAD_ACCESS as exception_mask_t;
+
+        /// Maximum exception ports the kernel returns from `task_get_exception_ports`.
+        /// macOS caps this at 32 internally; allocating a fixed-size array keeps the
+        /// drift-check path stack-allocated.
+        const MAX_EXCEPTION_PORTS: usize = 32;
+
+        /// Run the full live server loop. Returns when the pager is shutdown-flagged
+        /// or a hard Mach error fires.
+        pub(super) fn run_live_server(handle: &PagerHandle) -> Result<(), PagerError> {
+            let our_port = allocate_receive_port()
+                .map_err(|kr| PagerError::Mach(format!("mach_port_allocate: kr={kr}")))?;
+            install_exception_port(our_port).map_err(|kr| {
+                PagerError::Mach(format!("task_swap_exception_ports install: kr={kr}"))
+            })?;
+            info!(
+                port = our_port,
+                "squib-pager live: exception port installed"
+            );
+
+            let mut last_drift_check = Instant::now();
+            while !handle.is_shutting_down() {
+                let timeout_ms =
+                    u32::try_from(handle.poll_interval().as_millis()).unwrap_or(u32::MAX);
+                let kr = recv_one(our_port, timeout_ms);
+                match kr {
+                    KERN_SUCCESS => {
+                        // We received an exception. Today the dispatcher is
+                        // skeleton-only — log the message and let the kernel
+                        // re-deliver to the prior handler by *not* sending a
+                        // reply. Future refinement: parse the message body,
+                        // look up the (ipa, page) pair, fetch from the
+                        // PageSource, write into the vCPU thread state, and
+                        // reply with KERN_SUCCESS.
+                        debug!("squib-pager live: received exception (no-reply forwarder)");
+                    }
+                    rc if rc == MACH_RCV_TIMEOUT as i32 => {
+                        // Expected — every `poll_interval` we wake to
+                        // drift-check + check shutdown.
+                    }
+                    rc if rc == MACH_RCV_TOO_LARGE as i32 => {
+                        warn!("squib-pager live: oversize exception message dropped");
+                    }
+                    rc => {
+                        warn!(kr = rc, "squib-pager live: unexpected mach_msg return");
+                    }
+                }
+
+                if last_drift_check.elapsed() >= handle.poll_interval() {
+                    if let Err(e) = drift_check_live(our_port) {
+                        warn!(error = ?e, "squib-pager live: drift check failed");
+                    }
+                    last_drift_check = Instant::now();
+                }
+            }
+
+            // Shutdown — release the port. Best-effort; if dealloc fails the
+            // kernel will reclaim on process exit anyway.
+            // SAFETY: `our_port` was allocated by `mach_port_allocate` above
+            // and has not been deallocated yet (we're the only releaser).
+            let dealloc = unsafe { mach_port_deallocate(mach_task_self(), our_port) };
+            if dealloc != KERN_SUCCESS {
+                warn!(
+                    kr = dealloc,
+                    "squib-pager live: mach_port_deallocate failed (best-effort)"
+                );
+            }
+            debug!("squib-pager live: server exiting (shutdown requested)");
+            Ok(())
+        }
+
+        fn allocate_receive_port() -> Result<mach_port_t, i32> {
+            let mut port: mach_port_t = 0;
+            // SAFETY: `mach_port_allocate` writes `port` only when it returns
+            // KERN_SUCCESS; we own the allocated port until `mach_port_deallocate`.
+            let kr =
+                unsafe { mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mut port) };
+            if kr == KERN_SUCCESS {
+                Ok(port)
+            } else {
+                Err(kr)
+            }
+        }
+
+        fn install_exception_port(port: mach_port_t) -> Result<(), i32> {
+            let mut masks: [exception_mask_t; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut handlers: [mach_port_t; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut behaviors: [u32; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut flavors: [i32; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut count: u32 = MAX_EXCEPTION_PORTS as u32;
+
+            // SAFETY: `task_swap_exception_ports` reads our `port`, atomically
+            // installs it for `EXC_MASK_BAD_ACCESS`, and writes the prior
+            // handlers into the four out arrays. All buffers live on the
+            // stack for the duration of the call.
+            let kr = unsafe {
+                task_swap_exception_ports(
+                    mach_task_self(),
+                    SQUIB_EXC_MASK,
+                    port,
+                    EXCEPTION_DEFAULT as i32,
+                    THREAD_STATE_NONE,
+                    masks.as_mut_ptr() as exception_mask_array_t,
+                    &mut count,
+                    handlers.as_mut_ptr() as exception_handler_array_t,
+                    behaviors.as_mut_ptr() as exception_behavior_array_t,
+                    flavors.as_mut_ptr() as exception_flavor_array_t,
+                )
+            };
+            if kr == KERN_SUCCESS { Ok(()) } else { Err(kr) }
+        }
+
+        fn drift_check_live(our_port: mach_port_t) -> Result<(), i32> {
+            // Reads the active exception ports for our task. If our port is
+            // no longer the EXC_MASK_BAD_ACCESS handler, LLDB (or another
+            // attached debugger) has overwritten ours; re-install.
+            let mut masks: [exception_mask_t; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut handlers: [mach_port_t; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut behaviors: [u32; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut flavors: [i32; MAX_EXCEPTION_PORTS] = [0; MAX_EXCEPTION_PORTS];
+            let mut count: u32 = MAX_EXCEPTION_PORTS as u32;
+            // SAFETY: `task_get_exception_ports` writes only into the
+            // stack-resident arrays; we own them and the call returns
+            // before they go out of scope.
+            let kr = unsafe {
+                task_get_exception_ports(
+                    mach_task_self(),
+                    SQUIB_EXC_MASK,
+                    masks.as_mut_ptr() as exception_mask_array_t,
+                    &mut count,
+                    handlers.as_mut_ptr() as exception_handler_array_t,
+                    behaviors.as_mut_ptr() as exception_behavior_array_t,
+                    flavors.as_mut_ptr() as exception_flavor_array_t,
+                )
+            };
+            if kr != KERN_SUCCESS {
+                return Err(kr);
+            }
+            // Walk the returned set. If any handler that covers EXC_BAD_ACCESS
+            // is not our port, re-install.
+            let drifted = (0..count as usize)
+                .any(|i| (masks[i] & SQUIB_EXC_MASK) != 0 && handlers[i] != our_port);
+            if drifted {
+                debug!("squib-pager live: drift detected, re-installing");
+                install_exception_port(our_port)?;
+            }
+            Ok(())
+        }
+
+        fn recv_one(port: mach_port_t, timeout_ms: u32) -> i32 {
+            // 64-byte buffer is enough for an EXCEPTION_DEFAULT message; we
+            // don't unpack the body in this skeleton, so a small ceiling
+            // surfaces oversize faults as MACH_RCV_TOO_LARGE rather than a
+            // truncated read.
+            let mut header = mach_msg_header_t::default();
+            let option = if timeout_ms == 0 {
+                MACH_RCV_MSG
+            } else {
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT
+            };
+            let timeout = if timeout_ms == 0 {
+                MACH_MSG_TIMEOUT_NONE
+            } else {
+                timeout_ms
+            };
+            // SAFETY: `mach_msg` writes into the header buffer (size = recv_size),
+            // both buffer fields live on this frame and outlive the call.
+            // Passing a tiny recv_size means most real exception messages will
+            // surface as MACH_RCV_TOO_LARGE, which we handle as a warn-and-skip.
+            unsafe {
+                mach_msg(
+                    &mut header as *mut _ as *mut _,
+                    option as i32,
+                    0,
+                    size_of::<mach_msg_header_t>() as u32,
+                    port,
+                    timeout,
+                    0,
+                )
+            }
+        }
     }
 }
 

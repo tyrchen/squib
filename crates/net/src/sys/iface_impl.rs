@@ -387,21 +387,16 @@ fn build_descriptor(params: &StartParams) -> XpcObject {
     dict
 }
 
-/// Build the 16-byte `uuid_t` payload for `vmnet_interface_id_key`. Hash
-/// the operator-supplied `iface_id` deterministically — vmnet treats the
-/// value as opaque, so a non-cryptographic FNV-style mash is enough and
-/// avoids pulling in a `uuid` workspace dep for this single call site.
+/// Build the 16-byte `uuid_t` payload for `vmnet_interface_id_key`.
+///
+/// vmnet treats the value as opaque, so any deterministic-from-`iface_id`
+/// derivation works. We use [`uuid::Uuid::new_v5`] over the OID namespace
+/// — RFC 4122 § 4.3 — so the resulting UUID is structurally a valid v5
+/// UUID (the version-5 nibble is in the right place, the variant bits are
+/// set per RFC 4122). Tools like `xpc dump` that introspect the `iface_id`
+/// field then surface a sensible value rather than 16 random-looking bytes.
 fn iface_uuid_for(iface_id: &str) -> [u8; 16] {
-    let mut h1: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut h2: u64 = 0x100_0000_01b3;
-    for &b in iface_id.as_bytes() {
-        h1 = h1.wrapping_mul(0x100_0000_01b3) ^ u64::from(b);
-        h2 = h2.wrapping_mul(0xcbf2_9ce4_8422_2325) ^ u64::from(b.rotate_left(3));
-    }
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&h1.to_le_bytes());
-    out[8..].copy_from_slice(&h2.to_le_bytes());
-    out
+    *uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, iface_id.as_bytes()).as_bytes()
 }
 
 fn parse_mac_string(raw: &str) -> Option<[u8; 6]> {

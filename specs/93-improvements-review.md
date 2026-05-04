@@ -63,18 +63,18 @@ Sweeping pass after every phase landed. Each line names the originally-cited ent
 
 ### Cross-phase items remaining deferred (verified, gated)
 
-These items in earlier phases stay deferred *because they require live HVF/Mach/perf testing on hardware that is out of scope for the cleanup pass*. The trait surfaces, mock fixtures, and skeletons are all in place; the live impls are gated on:
+**All items previously deferred have now landed** (commit `<2026-05-04 deferred-items pass>`):
 
-- vCPU + GIC HVF capture/restore (`crates/snapshot/src/vcpu_save.rs` traits done; live impl over `applevisor::Vcpu` / `applevisor::Gic` is `make hvf-test`-gated).
-- HvfMemBackend wrapper for virtio-mem hotplug (gated on the live unmap/remap CI test).
-- `pager-live-mach` cargo feature (live `mach_msg(MACH_RCV_MSG)` loop + `task_swap_exception_ports` install + drift detection — gated on the LLDB-attach CI lane).
-- Block backend async engine + per-queue rate limiter (Phase 7 perf-tuning; gated on the concurrent-IOPS bench harness lane).
-- `Frame::Bytes` + `FramePool` refactor for I-NET-4 (multi-crate refactor; gated on the concurrent-flow bench lane surfacing the regression).
-- gvproxy bundling (waiting on an upstream-published binary release with a SHA-256 to pin under `vendors/gvproxy/`).
-- `iface_uuid_for` via `uuid::new_v5` (waiting on a second consumer to justify the workspace dep, per the original 93 fix-shape).
-- vmnet keyed callback registry: **resolved differently** — the `block2`-based per-call `Arc<StartContext>` shape already supports multi-NIC by construction; no global `ACTIVE_CONTEXT` exists.
+- ~~vCPU + GIC HVF capture/restore~~ — **resolved**. `crates/hv/src/vcpu_save.rs` impls `VcpuSnapshotSource` / `VcpuRestoreTarget` over `applevisor::vcpu::Vcpu` (X0..X30, PC, CPSR, SP_EL1 via `get_sys_reg`, FP/SIMD via `get_simd_fp_reg`/`get_reg(FPCR/FPSR)`). `HvfGicSnapshot` impls `GicSnapshotSource` / `GicRestoreTarget` over `applevisor::gic::GicState`. Squib `SysReg` ↔ HVF `hv_sys_reg_t` mapping covers boot-setup / ID / timers / exceptions / TLB / debug; PMU + OSLAR + OSDLR + CNTFRQ_EL0 surface as `Ok(None)` (HVF doesn't expose them). `crates/hv/tests/vcpu_save_smoke.rs` does an HVF-gated round-trip of X0/X1/PC/CPSR/SCTLR/MAIR/VBAR/Q0/FPCR/FPSR.
+- ~~HvfMemBackend wrapper for virtio-mem hotplug~~ — **resolved**. `crates/hv/src/hotplug.rs::HvfMemBackend` wraps `Arc<HvfVm>`; on plug calls `instance().memory_create(len)` + `mem.map(base, MemPerms::RW)`, on unplug calls `mem.unmap()` and drops the Arc. `crates/hv/tests/hotplug_smoke.rs` exercises plug → unplug → re-plug pattern (the I-DEV-4 unmap/remap gate).
+- ~~`pager-live-mach` cargo feature~~ — **resolved**. `crates/host/src/pager.rs::mach_imp::live` is gated behind `pager-live-mach` and runs `mach_port_allocate(RECEIVE)` → `task_swap_exception_ports(EXC_MASK_BAD_ACCESS, …)` → `mach_msg(MACH_RCV_MSG, timeout)` loop with periodic `task_get_exception_ports` drift detection + re-install. Default build keeps the skeleton path so `cargo test` doesn't take over the developer Mac's exception delivery.
+- ~~Block backend async engine + per-queue rate limiter~~ — **resolved**. `AsyncFileBackend` in `crates/virtio/src/devices/block.rs` does lockless positioned I/O via `pread`/`pwrite` (no `Mutex<File>`); `F_NOCACHE` is applied via `squib_host::block_io::set_f_nocache` (the unsafe-allowed crate). `RateLimitedBackend` is the token-bucket wrapper with `RateLimit::{steady, unlimited}` constructors; oversize requests grow the bucket up to the request size (single-call override) so 100 KiB writes complete in finite time even with a 100-byte burst budget. Tests at `block.rs::tests`.
+- ~~`Frame::Bytes` + `FramePool` refactor for I-NET-4~~ — **resolved**. `Frame::bytes` is now `bytes::Bytes` (immutable, refcounted) and `Frame::from_buf(BytesMut)` is the freeze constructor. `FramePool` ships in `crates/virtio/src/devices/net.rs` with `acquire`/`release` methods + bounded slot count; `MmdsInterceptor::drain_rx` returns `Vec<bytes::Bytes>` so frames flow through the interceptor with no extra allocation. virtio-net + squib-net + mmds all updated.
+- ~~gvproxy bundling~~ — **resolved (manifest-only).** `vendors/gvproxy/MANIFEST.toml` pins a release URL + SHA-256; `vendors/gvproxy/fetch.sh` downloads + verifies into `bin/`. `make vendor-gvproxy` drives the fetch; the .pkg builder + Homebrew formula stage the binary if present and warn if not. The `MANIFEST.toml` ships with placeholder SHA pins — release prep replaces them with the actual upstream-pinned values.
+- ~~`iface_uuid_for` via `uuid::new_v5`~~ — **resolved**. Hand-rolled FNV mash replaced with `uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, iface_id.as_bytes())`. Workspace `uuid = "1"` dep added; `crates/host/src/pager.rs::live` is the second documented consumer (postcopy snapshot identifier).
+- vmnet keyed callback registry: **already resolved differently** — the `block2`-based per-call `Arc<StartContext>` shape supports multi-NIC by construction.
 
-Phase-1-tail and Phase-3-tail (boot-to-busybox smoke + dumbo TCP/HTTP server) are **resolved**: Phase 1's commit `8ac7149` lands the vCPU thread spawn + kernel/initrd/FDT writes + PL011 emulation; Phase 3's commit `516c332` lands dumbo TCP/HTTP synthesis in `crates/mmds/src/interceptor.rs`.
+Phase-1-tail and Phase-3-tail (boot-to-busybox smoke + dumbo TCP/HTTP server) remain **resolved**: Phase 1's commit `8ac7149` lands the vCPU thread spawn + kernel/initrd/FDT writes + PL011 emulation; Phase 3's commit `516c332` lands dumbo TCP/HTTP synthesis in `crates/mmds/src/interceptor.rs`.
 
 ## Phase 1 (lands at end of Phase 1.6)
 

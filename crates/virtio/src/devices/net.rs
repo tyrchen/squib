@@ -48,19 +48,133 @@ const VIRTIO_NET_HDR_LEN: u32 = 12;
 /// IPv4 / TCP / UDP frame as it crosses the virtio-net boundary. Pure
 /// payload — the virtio-net header is consumed by the frontend before frames
 /// reach the backend (and prepended on RX).
+///
+/// Storage is `bytes::Bytes` (immutable, shared, refcounted) per I-NET-4 in
+/// [30-networking.md § 7](../../../specs/30-networking.md#7-invariants):
+/// the hot path is allocation-free for clones (`Bytes::clone` is just a
+/// refcount bump). New frames are typically built via [`FramePool::acquire`]
+/// → fill `BytesMut` → [`Frame::from_buf`].
 #[derive(Debug, Clone)]
 pub struct Frame {
     /// Raw bytes (Ethernet header + IP + payload).
-    pub bytes: Vec<u8>,
+    pub bytes: bytes::Bytes,
 }
 
 impl Frame {
-    /// Build a frame from a slice.
+    /// Build a frame from a slice. Allocates a fresh `Bytes` — call sites
+    /// that own the buffer should prefer [`Frame::from_buf`] which avoids the
+    /// copy.
     #[must_use]
     pub fn from_slice(slice: &[u8]) -> Self {
         Self {
-            bytes: slice.to_vec(),
+            bytes: bytes::Bytes::copy_from_slice(slice),
         }
+    }
+
+    /// Build a frame by freezing a [`bytes::BytesMut`] into the Bytes
+    /// shape. The caller's exclusive write access ends here; subsequent
+    /// readers go through the immutable `Bytes`.
+    #[must_use]
+    pub fn from_buf(buf: bytes::BytesMut) -> Self {
+        Self {
+            bytes: buf.freeze(),
+        }
+    }
+
+    /// Build a frame directly from a [`bytes::Bytes`] handle. Useful when
+    /// the caller already has a refcounted buffer (e.g. a parser that hands
+    /// out a slice of a larger pre-allocated buffer).
+    #[must_use]
+    pub const fn from_bytes(bytes: bytes::Bytes) -> Self {
+        Self { bytes }
+    }
+
+    /// Wire-form length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// `true` if the frame has no bytes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+/// MTU-sized buffer pool for the virtio-net hot path.
+///
+/// Pins I-NET-4 ([30-networking.md § 7](../../../specs/30-networking.md#7-invariants)):
+/// frame allocation goes through a pool of pre-allocated `BytesMut` buffers
+/// rather than `vec![0u8; mtu]` per-call. The pool is sized to MTU × 256 per
+/// direction (the 71 § 5 bench-harness gating value); bursts beyond the pool
+/// allocate fresh and are dropped on release rather than returned, so memory
+/// pressure spikes are bounded.
+///
+/// The pool is `Send + Sync`; per-backend instances share their RX/TX pools
+/// across the device thread and the host-side I/O thread without contention
+/// (a `parking_lot::Mutex<Vec<BytesMut>>` is the boot-time-cheap, hot-path-
+/// uncontended shape — RX or TX rarely interleave).
+#[derive(Debug)]
+pub struct FramePool {
+    free: Mutex<Vec<bytes::BytesMut>>,
+    mtu: usize,
+    pool_capacity: usize,
+}
+
+impl FramePool {
+    /// Build a pool with `pool_capacity` slots, each `mtu` bytes wide.
+    /// Slots are allocated lazily on first acquire.
+    #[must_use]
+    pub fn new(mtu: usize, pool_capacity: usize) -> Self {
+        Self {
+            free: Mutex::new(Vec::with_capacity(pool_capacity)),
+            mtu,
+            pool_capacity,
+        }
+    }
+
+    /// Acquire a buffer of at least `mtu` capacity. The buffer is empty
+    /// (`len() == 0`) on return; the caller fills it via `BytesMut::extend_from_slice`
+    /// or `unsafe { set_len(_) }` after a `read` writes into the spare capacity.
+    #[must_use]
+    pub fn acquire(&self) -> bytes::BytesMut {
+        let mut g = self.free.lock();
+        match g.pop() {
+            Some(mut buf) => {
+                buf.clear();
+                buf
+            }
+            None => bytes::BytesMut::with_capacity(self.mtu),
+        }
+    }
+
+    /// Return a buffer to the pool. Buffers beyond [`Self::pool_capacity`]
+    /// are dropped, bounding memory pressure under burst.
+    pub fn release(&self, buf: bytes::BytesMut) {
+        let mut g = self.free.lock();
+        if g.len() < self.pool_capacity {
+            g.push(buf);
+        }
+        // else: drop the buffer; capacity rebuilds on next acquire.
+    }
+
+    /// Pool capacity (slots).
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.pool_capacity
+    }
+
+    /// Configured MTU (per-buffer minimum capacity).
+    #[must_use]
+    pub const fn mtu(&self) -> usize {
+        self.mtu
+    }
+
+    /// Number of buffers currently in the free list (test/diagnostic).
+    #[must_use]
+    pub fn free_count(&self) -> usize {
+        self.free.lock().len()
     }
 }
 
@@ -133,7 +247,7 @@ impl FrameInterceptor for squib_mmds::MmdsInterceptor {
     fn drain_rx(&self) -> Vec<Frame> {
         squib_mmds::MmdsInterceptor::drain_rx(self)
             .into_iter()
-            .map(|bytes| Frame { bytes })
+            .map(Frame::from_bytes)
             .collect()
     }
 }
@@ -241,9 +355,7 @@ impl NetDevice {
             }
             // Strip header.
             let payload = if frame_bytes.len() > VIRTIO_NET_HDR_LEN as usize {
-                Frame {
-                    bytes: frame_bytes[VIRTIO_NET_HDR_LEN as usize..].to_vec(),
-                }
+                Frame::from_slice(&frame_bytes[VIRTIO_NET_HDR_LEN as usize..])
             } else {
                 continue;
             };
@@ -467,6 +579,57 @@ mod tests {
     }
 
     #[test]
+    fn test_should_acquire_and_release_buffers_via_frame_pool() {
+        let pool = FramePool::new(1500, 4);
+        assert_eq!(pool.free_count(), 0);
+        let buf1 = pool.acquire();
+        assert_eq!(buf1.len(), 0);
+        assert!(buf1.capacity() >= 1500);
+        let buf2 = pool.acquire();
+        assert_eq!(pool.free_count(), 0);
+        pool.release(buf1);
+        pool.release(buf2);
+        assert_eq!(pool.free_count(), 2);
+        // The next acquire reuses one of the pooled buffers, no fresh alloc.
+        let _ = pool.acquire();
+        assert_eq!(pool.free_count(), 1);
+    }
+
+    #[test]
+    fn test_should_drop_releases_beyond_pool_capacity() {
+        let pool = FramePool::new(1500, 2);
+        pool.release(bytes::BytesMut::with_capacity(1500));
+        pool.release(bytes::BytesMut::with_capacity(1500));
+        // Third release exceeds capacity → dropped, free_count stays at 2.
+        pool.release(bytes::BytesMut::with_capacity(1500));
+        assert_eq!(pool.free_count(), 2);
+    }
+
+    #[test]
+    fn test_should_clear_acquired_buffer_so_caller_writes_into_empty() {
+        let pool = FramePool::new(1500, 2);
+        let mut b = pool.acquire();
+        b.extend_from_slice(b"hello");
+        assert_eq!(b.len(), 5);
+        pool.release(b);
+        let b = pool.acquire();
+        assert_eq!(
+            b.len(),
+            0,
+            "pool must clear on acquire so the caller writes into an empty buffer"
+        );
+    }
+
+    #[test]
+    fn test_should_freeze_bytesmut_into_frame_via_from_buf() {
+        let mut buf = bytes::BytesMut::with_capacity(8);
+        buf.extend_from_slice(b"abcdef");
+        let frame = Frame::from_buf(buf);
+        assert_eq!(frame.bytes.as_ref(), b"abcdef");
+        assert_eq!(frame.len(), 6);
+    }
+
+    #[test]
     fn test_should_offer_mac_feature_when_config_supplies_one() {
         let dev = NetDevice::new(
             config(),
@@ -532,7 +695,7 @@ mod tests {
         dev.process_queue(TX_QUEUE as u16);
         let sent = backend.sent.lock().clone();
         assert_eq!(sent.len(), 1);
-        assert_eq!(&sent[0].bytes, b"helloeth");
+        assert_eq!(sent[0].bytes.as_ref(), b"helloeth");
     }
 
     #[test]
@@ -572,9 +735,10 @@ mod tests {
     fn test_should_inject_rx_frames_from_interceptor_with_virtio_header_prepended() {
         let backend = Arc::new(LoopbackBackend::default());
         let interceptor = Arc::new(ReplayInterceptor::default());
-        interceptor.rx_queue.lock().push(Frame {
-            bytes: b"hello-rx".to_vec(),
-        });
+        interceptor
+            .rx_queue
+            .lock()
+            .push(Frame::from_slice(b"hello-rx"));
         let mut dev = NetDevice::new(config(), backend.clone(), interceptor.clone());
         let mem = Arc::new(SliceGuestMemory::new(GuestAddress(0x4000_0000), 0x4000));
         let q = &mut dev.queues_mut()[RX_QUEUE];

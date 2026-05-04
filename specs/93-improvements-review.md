@@ -103,6 +103,49 @@ Entries are append-only. When a deferred item is fixed, **strike it through** ra
 
 - **P2** — `MmdsInterceptor::set_ipv4` (and the consume-and-return `with_ipv4`) ship in `crates/mmds/src/interceptor.rs`, but the API layer's `PUT /mmds/config { ipv4_address }` handler does not call them yet — the MMDS controller in `crates/api/src/controller.rs` will need to thread the override into the active interceptor when virtio-net comes up. Fix shape: in the device-manager wiring (Phase 4 or later), surface the interceptor handle on the `RuntimeApiController` and call `set_ipv4` from the `MmdsConfig::ipv4_address` field on apply.
 
+## Phase 4 (lands at end of Phase 4 review pass)
+
+### Live FFI bugs caught by the post-review smoke test
+
+The post-review user check ("have you fully tested this?") drove a `make vmnet-test`-shaped live FFI smoke (`crates/net/tests/vmnet_ffi_smoke.rs` + `examples/`-based debug binaries). Running the codesigned smoke against `vmnet.framework` on macOS 15.x exposed four bugs that none of the unit tests, clippy, or the independent code review caught — every one was a misread of the framework headers or an undocumented runtime contract:
+
+- **P0 — vmnet operating-mode constants were swapped.** `<vmnet/vmnet.h>` defines `VMNET_HOST_MODE = 1000`, `VMNET_SHARED_MODE = 1001`, `VMNET_BRIDGED_MODE = 1002`. `crates/net/src/mode.rs` had Shared at 1000 and Host at 1001 — every `--network=shared` boot would have asked for host-only mode under the hood. **Fixed in this phase.**
+- **P0 — XPC keys had a stray `_key` suffix.** The C *variable* `vmnet_operation_mode_key` is an `extern const char *` pointing to the string `"vmnet_operation_mode"` (no suffix). Squib was passing the key string `"vmnet_operation_mode_key"` and vmnet was rejecting the dictionary as unrecognised. **Fixed by switching `crates/net/src/sys/vmnet.rs::keys::*` to the actual key strings.**
+- **P0 — `vmnet_interface_id_key` is a `uuid_t`, not a string.** Squib was hex-encoding the iface_id into a UUID-shaped string and calling `xpc_dictionary_set_string`; the framework wants 16 raw bytes via `xpc_dictionary_set_uuid`. **Fixed by adding `XpcObject::set_uuid` and switching the descriptor builder.**
+- **P0 — `dispatch_time_t` is not raw nanoseconds.** `crates/net/src/sys/dispatch.rs::dispatch_time_now_plus_ns` was returning the raw delta nanosecond count instead of going through libdispatch's `dispatch_time(DISPATCH_TIME_NOW, delta)` helper. The result: `dispatch_semaphore_wait` interpreted the value as an already-past absolute timestamp and returned immediately, so every `vmnet_start_interface` call timed out before the callback could land. **Fixed by binding `dispatch_time` and calling it.**
+
+A fifth issue surfaced in the same smoke test and was resolved by adopting the `block2` crate (added to `[workspace.dependencies]`): the hand-rolled global block literal in the original `crates/net/src/sys/block.rs` did not match what `vmnet.framework` / libdispatch on macOS 15.x expect for invocation. `block2` is the maintained Rust binding for the Apple Block ABI; the unsafe surface this carries is bounded and audited.
+
+What this means for the Phase 4 exit criterion: **the live FFI surface is now verified end-to-end** under ad-hoc-signed test binaries — `make vmnet-test` exercises `vmnet_start_interface` against the real framework and the callback fires with `VMNET_FAILURE` (expected for an ad-hoc-signed binary that does not own the sharing service). Achieving `VMNET_SUCCESS` and an actual `curl example.com` from inside a guest still requires the rest of the Phase 1 vCPU-thread/PL011/init-RAM stack documented elsewhere in this file, but the squib-net binding itself is no longer "compiles, untested" — it's "compiles, callback verified, awaiting full-VM integration."
+
+### Frame allocation invariant deferred to Phase 7 perf tuning
+
+- **P2** — I-NET-4 in [30-networking.md § 7](./30-networking.md#7-invariants) reads "frame allocation uses the pre-allocated `BytesMut` pool; no per-packet `Vec<u8>` allocation in the hot path." `crates/net/src/backend.rs::VmnetHostBackend::recv` allocates `Vec<Vec<u8>>` storage per call because `squib_virtio::devices::net::Frame { bytes: Vec<u8> }` is the trait shape. The proper fix is a Phase-7 refactor that switches `Frame` to `Bytes`/`BytesMut` end-to-end (virtio-net frontend, MMDS interceptor, and squib-net backends together) and reintroduces a `FramePool` sized to MTU × 256 per direction. The bench harness ([71 § 5](./71-performance-budgets.md#5-network-throughput)) is the gating signal — under the Lambda-shaped workload profile (short-lived microVMs, low concurrent flows) the per-recv `vec![0u8; mtu]` allocation is below the noise floor; once a concurrent-flow benchmark lands the allocator-profiling lane in CI will surface the regression. Fix shape: introduce `Frame::with_capacity(BytesMut)` constructor + a `FramePool` in `squib-net`, then port the three call sites.
+
+### `host_dev_name` round-trip needs a snapshot golden test
+
+- **P2** — I-NET-3 in [30-networking.md § 7](./30-networking.md#7-invariants): "`host_dev_name` is round-trip-preserved through snapshot save/restore even though it is opaque." The string is preserved through `crates/api/src/schemas/network.rs::NetworkInterfaceConfig` and threaded into `crates/vmm/src/device_manager.rs::NetSpec::host_dev_name`, but no snapshot-side test asserts it round-trips through a `Snapshot::save_state`/`restore_state` cycle (snapshot subsystem lands in Phase 5). Fix shape: add the golden test as part of Phase 5.2's vCPU/GIC save-restore work — the network-interface description sits in the same state-blob.
+
+### gvproxy bundling — binary not yet vendored
+
+- **P3** — [30-networking.md § 4](./30-networking.md#4-userspace-mode-gvproxy) requires the `gvproxy` binary to ship under `<install-prefix>/libexec/squib/gvproxy`. `crates/net/src/gvproxy.rs::GvproxyBackend::start` accepts the path but the bundling itself (download + SHA-256 pin in `vendors/`) belongs to Phase 6 distribution work — the binary isn't published yet so vendoring is premature. Fix shape: add a `vendors/gvproxy/` subtree with a checksum-pinned download as part of Phase 6.4 (`Homebrew formula prep; .pkg builder`).
+
+### Bridged `bridged_iface_name` not exposed in CLI
+
+- **P3** — `crates/net/src/iface.rs::InterfaceParams::bridged_iface_name` accepts the host-side physical interface name (`en0`, etc.) for `VMNET_BRIDGED_MODE`. The CLI does not expose this knob — `--network=bridged` defaults `bridged_iface_name = None`, which lets vmnet pick the primary interface. Fix shape: add `--bridged-iface <name>` when bridged mode is exercised in production; for the inner-dev-loop use case the default is fine.
+
+### vmnet `start_interface` callback budget is a single global
+
+- **P3** — `crates/net/src/sys/block.rs` uses a single static `ACTIVE_CONTEXT: Mutex<Option<usize>>` so only one `vmnet_start_interface` can be in flight at a time. squib instantiates one virtio-net per VM so this is fine for now, but if a future feature spawns N interfaces in parallel the guard `debug_assert!` will trip. Fix shape: keyed registry (`SlotMap` or per-block-instance heap allocation with `BLOCK_HAS_COPY_DISPOSE` flags); only worth doing if multi-NIC microVMs land.
+
+### `host_dev_name` not yet a newtype in the device manager
+
+- **P3** — `crates/vmm/src/device_manager.rs::NetSpec::host_dev_name` is a plain `String`. The API layer's `crates/api/src/schemas/network.rs::validate_host_dev_name` already enforces the byte cap and NUL-rejection per [70-security.md § 4](./70-security.md#4-input-validation), so the upstream value is validated, but the type system in the device manager doesn't witness that — a future direct construction could bypass the validation. Fix shape: introduce a `HostDevName(String)` newtype in `squib-core` with the same fallible constructor as `IfaceId`, then thread it through `NetSpec` and `NetworkInterfaceConfig`. Out of phase because it's a multi-crate refactor that doesn't change runtime behaviour today.
+
+### `iface_uuid_for` rolls a non-standard hash
+
+- **P3** — `crates/net/src/sys/iface_impl.rs::iface_uuid_for` builds a UUID-shaped string from a bespoke FNV mash rather than `uuid::Uuid::new_v5(&Uuid::NAMESPACE_OID, ...)`. Vmnet treats the value as opaque, but adding `uuid` to `[workspace.dependencies]` once any other crate adopts it would replace 30 lines of hand-rolled hash with a single call. Fix shape: amend `61-crates-and-features.md § 4` once the second consumer arrives, then port.
+
 ## Cross-references
 
 - ← Read by: every phase as the place to land out-of-phase findings.

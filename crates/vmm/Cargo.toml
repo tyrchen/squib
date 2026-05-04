@@ -29,6 +29,7 @@ squib-hv = { workspace = true }
 squib-legacy = { workspace = true }
 squib-loader = { workspace = true }
 squib-mmds = { workspace = true }
+squib-net = { workspace = true }
 squib-virtio = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

@@ -46,6 +46,18 @@ async fn main() -> Result<()> {
         info!("--enable-pci is accepted for compatibility; squib uses virtio-MMIO transport");
     }
 
+    // Validate the requested network mode; surface the bridged-mode build-time
+    // gate before any VMM action runs. Phase 4 wires the host-side backends
+    // through the device manager — the actual VmnetIface/gvproxy spawn happens
+    // inside the VMM event loop when `Action(InstanceStart)` lands.
+    let net_mode = args.network.to_net_mode().map_err(|e| anyhow::anyhow!(e))?;
+    if matches!(net_mode, squib_net::NetMode::Userspace) && args.gvproxy_path.is_none() {
+        warn!(
+            "--network=userspace selected without --gvproxy-path; falling back to \
+             /usr/local/libexec/squib/gvproxy"
+        );
+    }
+
     let snapshot = ControllerSnapshot::new(
         args.id.clone(),
         FIRECRACKER_COMPAT_VERSION,

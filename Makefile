@@ -77,6 +77,20 @@ hvf-test:
 	done
 	@$(CARGO) test -p squib-hv -p squib-vmm --tests -- --nocapture --include-ignored
 
+# Build, ad-hoc sign, and run the squib-net live FFI tests against
+# vmnet.framework. Same pattern as hvf-test: cargo test does not codesign
+# test binaries, but vmnet won't even invoke our callback without the
+# `com.apple.security.hypervisor` entitlement on the binary. We sign post-
+# build then re-invoke `cargo test`. Requires `jq`.
+vmnet-test:
+	@$(CARGO) test -p squib-net --tests --no-run --quiet
+	@for bin in $$($(CARGO) test -p squib-net --tests --no-run --message-format=json 2>/dev/null \
+	                | jq -r 'select(.profile.test == true) | .filenames[]'); do \
+	    echo "signing $$bin"; \
+	    codesign --sign - --entitlements $(ENTITLEMENTS) --deep --force $$bin; \
+	done
+	@$(CARGO) test -p squib-net --tests -- --nocapture --include-ignored
+
 # Notarize the signed binary. Requires APPLE_ID, APPLE_TEAM_ID, and an app-specific
 # password in env (or use --keychain-profile if you've set one up).
 notarize: sign
@@ -119,4 +133,4 @@ demo: build-reference-vm
 	@$(CARGO) test -p squib-vmm --test linux_boot_smoke -- \
 	    --nocapture --include-ignored test_reference_vm_boots_linux_and_curls_mmds
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test build-reference-vm demo notarize release update-submodule
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged verify hvf-test vmnet-test build-reference-vm demo notarize release update-submodule

@@ -110,6 +110,11 @@ pub(crate) struct Args {
     /// Networking mode (squib extension).
     #[arg(long, value_enum, default_value_t = NetworkMode::Shared)]
     pub(crate) network: NetworkMode,
+
+    /// Path to the bundled `gvproxy` binary. Required for `--network=userspace`.
+    /// Falls back to `SQUIB_GVPROXY_PATH` and then `/usr/local/libexec/squib/gvproxy`.
+    #[arg(long, value_name = "PATH", env = "SQUIB_GVPROXY_PATH")]
+    pub(crate) gvproxy_path: Option<PathBuf>,
 }
 
 /// Firecracker-compatible log level set.
@@ -147,14 +152,42 @@ impl LogLevel {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 #[value(rename_all = "lowercase")]
 pub(crate) enum NetworkMode {
-    /// vmnet-shared (NAT). Default. Self-claimable `com.apple.vm.networking` entitlement.
+    /// vmnet-shared (NAT). Default. No entitlement beyond `com.apple.security.hypervisor`.
     Shared,
     /// vmnet-bridged. Requires the restricted form of `com.apple.vm.networking`.
+    /// Only available when squib is built with the `bridged` cargo feature.
     Bridged,
-    /// vmnet-host (host-only network).
+    /// vmnet-host (host-only network). No entitlement beyond `com.apple.security.hypervisor`.
     Host,
     /// Embedded gvproxy userspace stack. No entitlement required.
     Userspace,
+}
+
+impl NetworkMode {
+    /// Translate the CLI choice into the [`squib_net::NetMode`] that the device
+    /// manager consumes. `Bridged` is only supported when squib is built with
+    /// the `bridged` cargo feature; otherwise an error is returned and the
+    /// caller should `bail!` on the message.
+    pub(crate) fn to_net_mode(self) -> Result<squib_net::NetMode, &'static str> {
+        match self {
+            Self::Shared => Ok(squib_net::NetMode::SHARED),
+            Self::Host => Ok(squib_net::NetMode::HOST),
+            Self::Userspace => Ok(squib_net::NetMode::USERSPACE),
+            Self::Bridged => {
+                #[cfg(feature = "bridged")]
+                {
+                    Ok(squib_net::NetMode::BRIDGED)
+                }
+                #[cfg(not(feature = "bridged"))]
+                {
+                    Err(
+                        "--network=bridged requires a binary built with `--features bridged` and \
+                         signed with `com.apple.vm.networking`. See specs/30-networking.md § 5.",
+                    )
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +242,43 @@ mod tests {
     #[test]
     fn cli_command_definition_is_well_formed() {
         Args::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_should_parse_userspace_network_mode_with_gvproxy_path() {
+        let args = Args::try_parse_from([
+            "squib",
+            "--network",
+            "userspace",
+            "--gvproxy-path",
+            "/opt/squib/gvproxy",
+        ])
+        .unwrap();
+        assert!(matches!(args.network, NetworkMode::Userspace));
+        assert_eq!(
+            args.gvproxy_path.as_deref().and_then(|p| p.to_str()),
+            Some("/opt/squib/gvproxy")
+        );
+    }
+
+    #[test]
+    fn cli_should_translate_shared_into_squib_net_shared_mode() {
+        let m = NetworkMode::Shared.to_net_mode().unwrap();
+        assert!(matches!(m, squib_net::NetMode::Vmnet(_)));
+        assert!(!m.needs_restricted_entitlement());
+    }
+
+    #[test]
+    fn cli_should_reject_bridged_without_feature_flag() {
+        // The default build does not include the `bridged` cargo feature.
+        let r = NetworkMode::Bridged.to_net_mode();
+        #[cfg(not(feature = "bridged"))]
+        {
+            assert!(r.is_err());
+        }
+        #[cfg(feature = "bridged")]
+        {
+            assert!(r.is_ok());
+        }
     }
 }

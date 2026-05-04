@@ -34,12 +34,13 @@ use squib_fdt::VirtioSlot;
 use squib_gic::Gic;
 use squib_legacy::{Pl011, Pl011Sink};
 use squib_mmds::{Mmds, MmdsInterceptor, TokenStore};
+use squib_net::{LoopbackHostBackend, NetHostBackend};
 use squib_virtio::{
     VirtioDevice,
     devices::{
         block::{BlockConfig, BlockDevice, CacheType, SyncFileBackend},
         console::{ConsoleDevice, ConsoleSink},
-        net::{LoopbackBackend, NetConfig, NetDevice},
+        net::{NetBackend, NetConfig, NetDevice},
         rng::{OsEntropy, RngDevice},
     },
     interrupt::IrqLine,
@@ -111,10 +112,40 @@ pub struct DeviceBuildArgs {
     pub mmds_size_cap: usize,
     /// Optional block-device config — loads `/dev/vda`.
     pub block: Option<BlockConfigSpec>,
-    /// Whether to expose virtio-net (always pairs with the MMDS interceptor).
-    pub enable_net: bool,
+    /// Optional net config. `None` ⇒ no virtio-net device (MMDS still constructed
+    /// for API-side population; just unbound). `Some(NetSpec { backend: Loopback })`
+    /// keeps the prior unit-test behaviour. Per
+    /// [30-networking.md § 2](../../../specs/30-networking.md#2-modes).
+    pub net: Option<NetSpec>,
     /// Whether to expose virtio-console as a secondary console.
     pub enable_console: bool,
+}
+
+/// virtio-net configuration plus the host-side backend choice.
+pub struct NetSpec {
+    /// Operator-supplied iface_id (`/network-interfaces/{id}`).
+    pub iface_id: String,
+    /// Caller-supplied host_dev_name (informational; the vmnet handle is derived).
+    pub host_dev_name: String,
+    /// Optional explicit guest MAC; falls back to a stable locally-administered
+    /// default if absent.
+    pub guest_mac: Option<[u8; 6]>,
+    /// Optional explicit MTU; vmnet's reported value is used if `None`.
+    pub mtu: Option<u16>,
+    /// Host-side backend (vmnet / gvproxy / loopback). Loopback is the test
+    /// default and the deterministic non-macOS fallback.
+    pub backend: NetHostBackend,
+}
+
+impl std::fmt::Debug for NetSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetSpec")
+            .field("iface_id", &self.iface_id)
+            .field("host_dev_name", &self.host_dev_name)
+            .field("guest_mac", &self.guest_mac)
+            .field("mtu", &self.mtu)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for DeviceBuildArgs {
@@ -122,7 +153,7 @@ impl std::fmt::Debug for DeviceBuildArgs {
         f.debug_struct("DeviceBuildArgs")
             .field("mmds_size_cap", &self.mmds_size_cap)
             .field("block", &self.block.is_some())
-            .field("enable_net", &self.enable_net)
+            .field("net", &self.net.is_some())
             .field("enable_console", &self.enable_console)
             .finish_non_exhaustive()
     }
@@ -208,16 +239,29 @@ pub fn build_device_layout(
     // does it actually receive frames.
     let mmds = MmdsInterceptor::new(Mmds::new(args.mmds_size_cap), TokenStore::new());
 
-    if args.enable_net {
+    if let Some(spec) = args.net {
         let net_slot = alloc_or_fail(&mut allocator)?;
+        // If the backend is a live vmnet interface, clamp the operator-supplied
+        // MTU to vmnet's negotiated value. Setting a virtio MTU above vmnet's
+        // would cause the guest to emit oversize frames that vmnet rejects with
+        // VMNET_PACKET_TOO_BIG.
+        let effective_mtu: u16 = match (&spec.backend, spec.mtu) {
+            (NetHostBackend::Vmnet(b), Some(m)) => {
+                u16::try_from(b.iface().mtu()).unwrap_or(1500).min(m)
+            }
+            (NetHostBackend::Vmnet(b), None) => u16::try_from(b.iface().mtu()).unwrap_or(1500),
+            (_, Some(m)) => m,
+            (_, None) => 1500,
+        };
+        let backend: Arc<dyn NetBackend> = Arc::new(spec.backend);
         let net = NetDevice::new(
             NetConfig {
-                iface_id: "eth0".into(),
-                host_dev_name: "host-noop".into(),
-                guest_mac: Some(default_guest_mac()),
-                mtu: Some(1500),
+                iface_id: spec.iface_id,
+                host_dev_name: spec.host_dev_name,
+                guest_mac: Some(spec.guest_mac.unwrap_or_else(default_guest_mac)),
+                mtu: Some(effective_mtu),
             },
-            Arc::new(LoopbackBackend::default()),
+            backend,
             Arc::new(mmds.clone()),
         );
         plug_virtio(&bus, net_slot, Arc::clone(&gic), Arc::clone(&mem), net)?;
@@ -274,8 +318,23 @@ fn plug_virtio<D: VirtioDevice + 'static>(
 /// Default guest MAC for the reference VM. Locally-administered (bit 1
 /// of the first octet set), unicast (bit 0 clear). Stable across boots
 /// so a guest user can pin a static lease in their host.
-const fn default_guest_mac() -> [u8; 6] {
+pub const fn default_guest_mac() -> [u8; 6] {
     [0x06, 0x00, 0xAC, 0x10, 0x00, 0x02]
+}
+
+impl NetSpec {
+    /// Loopback / no-op host backend. Used in unit tests and as the safe
+    /// fallback when no operator-supplied network mode is set.
+    #[must_use]
+    pub fn loopback(iface_id: impl Into<String>, host_dev_name: impl Into<String>) -> Self {
+        Self {
+            iface_id: iface_id.into(),
+            host_dev_name: host_dev_name.into(),
+            guest_mac: None,
+            mtu: None,
+            backend: NetHostBackend::Loopback(LoopbackHostBackend::default()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -320,7 +379,7 @@ mod tests {
                 pl011_sink: Box::new(DiscardSink),
                 mmds_size_cap: 8192,
                 block: None,
-                enable_net: false,
+                net: None,
                 enable_console: false,
             },
         )
@@ -350,7 +409,7 @@ mod tests {
                     path: path.clone(),
                     read_only: true,
                 }),
-                enable_net: true,
+                net: Some(NetSpec::loopback("eth0", "tap0")),
                 enable_console: false,
             },
         )
@@ -382,7 +441,7 @@ mod tests {
                 pl011_sink: Box::new(DiscardSink),
                 mmds_size_cap: 8192,
                 block: None,
-                enable_net: true,
+                net: Some(NetSpec::loopback("eth0", "tap0")),
                 enable_console: false,
             },
         )

@@ -1,0 +1,40 @@
+[package]
+name = "squib-net"
+description = "Host-side networking for squib: vmnet (shared/host/bridged) + gvproxy userspace"
+categories = ["virtualization"]
+keywords = ["vmnet", "gvproxy", "networking", "virtio-net"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[features]
+# Default-off. Compile in the bridged-mode (`VMNET_BRIDGED_MODE`) codepath. The
+# bridged-enabled binary is signed with `com.apple.vm.networking` (restricted)
+# and built with `--features bridged`. Per [30-networking.md § 5] and D17.
+default = []
+bridged = []
+
+[lints]
+workspace = true
+
+[dependencies]
+squib-core = { workspace = true }
+squib-virtio = { workspace = true }
+
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+block2 = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

@@ -43,7 +43,7 @@ use squib_gic::{Gic, GicSizes, HvfGic};
 use squib_legacy::Pl011Sink;
 use squib_vmm::{
     BootArtifacts, build_microvm_for_boot,
-    device_manager::{DeviceBuildArgs, build_device_layout},
+    device_manager::{DeviceBuildArgs, NetSpec, build_device_layout},
     runner::{ShutdownReason, run_microvm_with_budget},
 };
 
@@ -142,7 +142,7 @@ fn test_reference_vm_boots_linux_and_curls_mmds() {
             pl011_sink: Box::new(sink.clone()),
             mmds_size_cap: 8192,
             block: None,
-            enable_net: true,
+            net: Some(NetSpec::loopback("eth0", "tap0")),
             enable_console: false,
         },
     )

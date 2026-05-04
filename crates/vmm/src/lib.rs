@@ -25,7 +25,8 @@ pub mod runner;
 
 pub use builder::{BootArtifacts, BootError, build_microvm_for_boot};
 pub use device_manager::{
-    BlockConfigSpec, DeviceBuildArgs, DeviceError, DeviceLayout, build_device_layout,
+    BlockConfigSpec, DeviceBuildArgs, DeviceError, DeviceLayout, NetSpec, build_device_layout,
+    default_guest_mac,
 };
 pub use resources::{InitrdSource, KernelSource, VmResources};
 #[cfg(target_os = "macos")]

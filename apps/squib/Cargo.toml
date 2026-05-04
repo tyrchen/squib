@@ -13,6 +13,13 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Enable the bridged-mode codepath in `squib-net`. Pair with the
+# `apps/squib/squib-bridged.entitlements` plist and the `make sign-bridged`
+# target. Per [30-networking.md § 5] and D17.
+bridged = ["squib-net/bridged"]
+
 [[bin]]
 name = "squib"
 path = "src/main.rs"
@@ -20,6 +27,7 @@ path = "src/main.rs"
 [dependencies]
 squib-api = { workspace = true }
 squib-core = { workspace = true }
+squib-net = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

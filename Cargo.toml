@@ -30,7 +30,7 @@ must_use_candidate = "allow"
 # error / async core
 anyhow = "1.0.102"
 thiserror = "2.0.18"
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "sync", "fs", "io-util", "time", "signal"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "sync", "fs", "io-util", "time", "signal", "process"] }
 
 # serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -81,6 +81,14 @@ semver = { version = "1", features = ["serde"] }
 # pull in macOS 26 symbols and fail at runtime on macOS 15.
 applevisor = { version = "1.0", default-features = false, features = ["macos-15-0"] }
 
+# `libc` — needed by squib-net for `socketpair(2)` plumbing into gvproxy
+# and by the vmnet FFI for `iovec` shape.
+libc = "0.2"
+
+# Apple Block ABI shim. Used by squib-net to construct the callback blocks
+# `vmnet.framework` consumes. Maintained by the objc2 ecosystem.
+block2 = "0.6"
+
 # benchmarking
 criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
 
@@ -97,3 +105,4 @@ squib-bus = { path = "crates/bus" }
 squib-virtio = { path = "crates/virtio" }
 squib-mmds = { path = "crates/mmds" }
 squib-legacy = { path = "crates/legacy" }
+squib-net = { path = "crates/net" }

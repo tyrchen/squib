@@ -7,7 +7,11 @@
 
 use std::{
     ffi::CString,
-    fs,
+    fs, io,
+    os::{
+        fd::{AsRawFd as _, FromRawFd, OwnedFd},
+        unix::{ffi::OsStrExt, fs::PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -102,19 +106,88 @@ impl JailerEnv {
     /// Stage `--exec-file` inside the chroot directory. Creates the chroot
     /// path tree first; both steps fail with [`JailerError::CreateChroot`]
     /// or [`JailerError::StageExecFile`] respectively.
+    ///
+    /// Once the chroot tree is created, the directory mode is forced to `0o755`
+    /// — `create_dir_all` inherits the caller's umask (typically `022`, but
+    /// service managers sometimes start launchers with `002`), and a chroot tree
+    /// readable by group / world is a real lateral-movement risk on a multi-tenant
+    /// host (see `specs/70-security.md` § 5).
+    ///
+    /// The `--exec-file` copy goes through an `O_NOFOLLOW + fstat` open of the
+    /// canonical source path (closing the TOCTOU window between
+    /// [`canonicalize_exec_file`] and the copy: a racing rename of the canonical
+    /// path can no longer slip a different binary in under us).
     pub(crate) fn stage(&self) -> Result<()> {
         fs::create_dir_all(&self.chroot_dir).map_err(|e| JailerError::CreateChroot {
             path: self.chroot_dir.clone(),
             source: e,
         })?;
+        // I-JAIL-1 expects the chroot tree to be operator-readable but never
+        // group/world writable. Setting `0o755` explicitly defeats whatever
+        // umask the caller arrived with.
+        fs::set_permissions(&self.chroot_dir, fs::Permissions::from_mode(0o755)).map_err(|e| {
+            JailerError::CreateChroot {
+                path: self.chroot_dir.clone(),
+                source: e,
+            }
+        })?;
         let dst = self.chroot_dir.join(&self.exec_file_basename);
-        fs::copy(&self.exec_file_host, &dst).map_err(|e| JailerError::StageExecFile {
+        copy_via_nofollow(&self.exec_file_host, &dst).map_err(|e| JailerError::StageExecFile {
             src: self.exec_file_host.clone(),
             dst: dst.clone(),
             source: e,
         })?;
         Ok(())
     }
+}
+
+/// Copy `src` → `dst` while closing the TOCTOU window on `src`. The pattern is:
+///
+/// 1. `open(src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)` — refuses to traverse a symlink that
+///    materialised between [`canonicalize_exec_file`] and now.
+/// 2. `fstat(src_fd)` — verify the open fd is a regular file. Anyone who rename(2)'d the canonical
+///    path between canonicalize and open might have swapped in a directory, FIFO, or device node.
+/// 3. `std::io::copy` from the file backed by the fd into the destination.
+fn copy_via_nofollow(src: &Path, dst: &Path) -> io::Result<u64> {
+    let src_c = path_to_cstring(src)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "src path contains NUL"))?;
+    // SAFETY: `open` reads `src_c` as a NUL-terminated C string for the
+    // duration of the call. `O_NOFOLLOW | O_CLOEXEC` are constants and have
+    // no extra mode-argument requirement when O_CREAT is absent.
+    let raw = unsafe {
+        libc::open(
+            src_c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a freshly-opened fd we own; wrapping it in `OwnedFd`
+    // transfers ownership to RAII and ensures `close(2)` runs even on the
+    // error paths below.
+    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fstat` reads the metadata of the fd into the `stat` buffer.
+    // We pass a pointer to a stack-allocated `MaybeUninit<libc::stat>` whose
+    // size matches what fstat writes; on success the bytes are initialised.
+    let rc = unsafe { libc::fstat(owned.as_raw_fd(), st.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: rc == 0 means fstat fully populated the stat struct.
+    let st = unsafe { st.assume_init() };
+    let mode_type = st.st_mode & libc::S_IFMT;
+    if mode_type != libc::S_IFREG {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "exec-file is not a regular file (post-canonicalise check failed)",
+        ));
+    }
+    let mut src_file = fs::File::from(owned);
+    let mut dst_file = fs::File::create(dst)?;
+    let bytes = io::copy(&mut src_file, &mut dst_file)?;
+    Ok(bytes)
 }
 
 /// `--id` charset / length validator. Matches upstream jailer's
@@ -148,6 +221,11 @@ fn canonicalize_exec_file(path: &Path) -> Result<PathBuf> {
         path: path.to_path_buf(),
         source: e,
     })?;
+    // First-pass check on the canonicalised path. The authoritative regular-file
+    // check happens later inside [`copy_via_nofollow`] against an `O_NOFOLLOW`-
+    // opened fd — this `metadata()` call only earlies-out the obvious "the
+    // operator pointed at a directory" case at validate time so the operator
+    // gets a clear error before any chroot creation work runs.
     let meta = fs::metadata(&canonical).map_err(|e| JailerError::Canonicalize {
         path: canonical.clone(),
         source: e,
@@ -166,10 +244,12 @@ pub(crate) fn compose_chroot_dir(base: &Path, id: &str) -> PathBuf {
 }
 
 fn path_to_cstring(p: &Path) -> Result<CString> {
-    let s = p
-        .to_str()
-        .ok_or_else(|| JailerError::PathContainsNul(p.to_path_buf()))?;
-    CString::new(s).map_err(|_| JailerError::PathContainsNul(p.to_path_buf()))
+    // Paths on Darwin are bag-of-bytes (HFS+/APFS preserves any byte sequence
+    // except NUL and `/`). Going through `OsStr::as_bytes` instead of `to_str`
+    // means we accept non-UTF-8 paths the operator may genuinely have on disk
+    // — only the interior-NUL case is the real failure here.
+    let bytes = p.as_os_str().as_bytes();
+    CString::new(bytes).map_err(|_| JailerError::PathContainsNul(p.to_path_buf()))
 }
 
 fn arg_to_cstring(raw: &str) -> Result<CString> {

@@ -289,8 +289,12 @@ fn add_cpus(fdt: &mut FdtWriter, args: &FdtBuildArgs<'_>) -> Result<(), FdtError
         fdt.property_string("compatible", "arm,armv8")?;
         fdt.property_string("enable-method", "psci")?;
         // For #address-cells=1, `reg` is the affinity-1<<8 | affinity-0 portion of MPIDR.
-        let truncated =
-            u32::try_from(mpidr & 0x00FF_FFFF).expect("mpidr & 0xFFFFFF always fits in u32");
+        // The mask `0x00FF_FFFF` keeps only the low 24 bits, so the value provably fits in u32 —
+        // we lower with a non-narrowing `as`-cast (the alternative `try_from(...)?` would surface
+        // a compile-time-impossible error path, the alternative `try_from(...).expect(...)` would
+        // violate CLAUDE.md's "no expect in production" rule).
+        #[allow(clippy::cast_possible_truncation, reason = "masked to 24 bits above")]
+        let truncated = (mpidr & 0x00FF_FFFF) as u32;
         fdt.property_u32("reg", truncated)?;
         fdt.end_node(cpu)?;
     }

@@ -318,3 +318,142 @@ async fn f_put_actions_flush_metrics() {
     assert_eq!(resp.status, 204);
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn f_get_balloon_statistics() {
+    let server = CompatServer::spawn().await;
+    let resp = http_request(
+        server.socket(),
+        &build_request("GET", "/balloon/statistics", None),
+    )
+    .await;
+    // GET handlers return `200 Json(…)` (the stats payload, empty pre-boot) — the
+    // F row contract is "endpoint reachable, response shape stable", which 200
+    // with `{}` satisfies.
+    assert_eq!(resp.status, 200);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn f_patch_balloon_statistics() {
+    // `PATCH /balloon/statistics` is post-boot only — the controller's phase
+    // check rejects it pre-boot (matches upstream Firecracker which returns 400
+    // until the VMM is running).
+    let server = CompatServer::spawn_with(
+        LifecyclePhase::Running,
+        firecracker_compat::StubBehaviour::Production,
+    )
+    .await;
+    let body = r#"{ "stats_polling_interval_s": 5 }"#;
+    let resp = http_request(
+        server.socket(),
+        &build_request("PATCH", "/balloon/statistics", Some(body)),
+    )
+    .await;
+    assert_eq!(resp.status, 204);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn f_put_snapshot_create_returns_documented_stub_fault() {
+    // Phase 5 ships the snapshot subsystem in isolation (atomic save, sparse
+    // memory, dirty tracking) but capturing live vCPU + GIC state requires the
+    // VMM event loop. Until that lands, /snapshot/create returns 400 with a
+    // stable `fault_message` — the F row's contract on this stub-VMM build is
+    // "endpoint reachable, response shape stable".
+    let server = CompatServer::spawn_with(
+        LifecyclePhase::Paused,
+        firecracker_compat::StubBehaviour::Production,
+    )
+    .await;
+    let body = r#"{
+        "snapshot_path": "/tmp/squib_compat_snap",
+        "mem_file_path": "/tmp/squib_compat_mem",
+        "snapshot_type": "Full",
+        "version": "1.0.0"
+    }"#;
+    let resp = http_request(
+        server.socket(),
+        &build_request("PUT", "/snapshot/create", Some(body)),
+    )
+    .await;
+    assert_eq!(resp.status, 400);
+    let body_str = std::str::from_utf8(&resp.body).expect("utf8");
+    assert!(
+        body_str.contains("Snapshot subsystem ready"),
+        "fault_message text changed: {body_str}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn f_put_snapshot_load_returns_documented_stub_fault() {
+    let server = CompatServer::spawn().await;
+    let body = r#"{
+        "snapshot_path": "/tmp/squib_compat_snap",
+        "mem_backend": { "backend_type": "File", "backend_path": "/tmp/squib_compat_mem" }
+    }"#;
+    let resp = http_request(
+        server.socket(),
+        &build_request("PUT", "/snapshot/load", Some(body)),
+    )
+    .await;
+    assert_eq!(resp.status, 400);
+    let body_str = std::str::from_utf8(&resp.body).expect("utf8");
+    assert!(
+        body_str.contains("Snapshot subsystem ready"),
+        "fault_message text changed: {body_str}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn f_patch_vm_pause_post_boot() {
+    let server = CompatServer::spawn_with(
+        LifecyclePhase::Running,
+        firecracker_compat::StubBehaviour::Production,
+    )
+    .await;
+    let body = r#"{ "state": "Paused" }"#;
+    let resp = http_request(server.socket(), &build_request("PATCH", "/vm", Some(body))).await;
+    assert_eq!(resp.status, 204);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn f_patch_vm_resume_post_boot() {
+    let server = CompatServer::spawn_with(
+        LifecyclePhase::Paused,
+        firecracker_compat::StubBehaviour::Production,
+    )
+    .await;
+    let body = r#"{ "state": "Resumed" }"#;
+    let resp = http_request(server.socket(), &build_request("PATCH", "/vm", Some(body))).await;
+    assert_eq!(resp.status, 204);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn f_put_actions_instance_start_returns_documented_stub_fault() {
+    // The stub VMM rejects InstanceStart with the documented `fault_message`
+    // until Track A's vCPU run loop lands. Once the live VMM is wired, this
+    // test flips to assert `204` automatically.
+    let server = CompatServer::spawn_with(
+        LifecyclePhase::Uninitialized,
+        firecracker_compat::StubBehaviour::Production,
+    )
+    .await;
+    let body = r#"{ "action_type": "InstanceStart" }"#;
+    let resp = http_request(
+        server.socket(),
+        &build_request("PUT", "/actions", Some(body)),
+    )
+    .await;
+    assert_eq!(resp.status, 400);
+    let body_str = std::str::from_utf8(&resp.body).expect("utf8");
+    assert!(
+        body_str.contains("VMM not yet wired"),
+        "fault_message text changed: {body_str}"
+    );
+    server.shutdown().await;
+}

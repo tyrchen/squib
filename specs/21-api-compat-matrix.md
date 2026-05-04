@@ -43,7 +43,7 @@ Day-1 commitments. No "Late" status — everything ships in 1.0.
 | PUT | `/mmds/config` | F | |
 | GET / PUT / PATCH | `/balloon` | F | |
 | GET / PATCH | `/balloon/statistics` | F | |
-| PATCH | `/balloon/hinting/{start,status,stop}` | F | virtio-balloon free-page hinting (preview); we implement |
+| PATCH | `/balloon/hinting/{op}` | F | virtio-balloon free-page hinting (preview); `{op}` ∈ `{start, status, stop}` (`BalloonHintingOp` enum, `crates/api/src/schemas/balloon.rs`); we implement |
 | PUT | `/entropy` | F | |
 | PUT | `/serial` | F | |
 | PUT / PATCH / DELETE | `/pmem/{id}` | F | virtio-pmem on memory-mapped file |

@@ -41,6 +41,10 @@ fn main() -> std::process::ExitCode {
     let args = Args::parse();
     init_tracing(args.level);
     args.warn_unsupported();
+    if let Err(msg) = args.validate_passthrough_argv_total() {
+        error!("{msg}");
+        return std::process::ExitCode::from(1);
+    }
 
     match run(&args) {
         Ok(()) => std::process::ExitCode::SUCCESS,

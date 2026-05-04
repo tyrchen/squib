@@ -21,6 +21,7 @@
 pub mod backend;
 pub mod error;
 pub mod exit;
+pub mod identifiers;
 pub mod lifecycle;
 pub mod memory;
 pub mod vcpu;
@@ -28,6 +29,7 @@ pub mod vcpu;
 pub use backend::{BackendCapabilities, BackendKind, HypervisorBackend, MAX_SUPPORTED_VCPUS, Vm};
 pub use error::{Error, Result};
 pub use exit::{DebugInfo, VmExit};
+pub use identifiers::{HOST_DEV_NAME_MAX_BYTES, HostDevName, IdentifierError};
 pub use lifecycle::{LifecyclePhase, WireVmState};
 pub use memory::{
     GuestAddress, GuestMemory, GuestMemoryRegion, GuestRange, Protection, SliceGuestMemory,

@@ -125,28 +125,137 @@ impl SysReg {
     /// A stable wire-encoding for use as a `BTreeMap<u64, u64>` key in
     /// `VcpuState::sys_regs`.
     ///
-    /// The encoding is `index_in_all() + 1` (1-based, so `0` is reserved for
-    /// "unknown"). Snapshot consumers must round-trip through
-    /// [`Self::from_encoded`] — the wire shape is squib-private (D6).
+    /// Each variant carries an explicitly assigned wire constant — reordering [`Self::all`]
+    /// or inserting a new variant in the middle does **not** change the encoding (the
+    /// previous positional scheme silently re-keyed every register on a reorder, which
+    /// would surface as a snapshot mismatch on the *next* `restore`, not the build).
+    /// `0` is reserved for "unknown" and never assigned. Snapshot consumers must round-trip
+    /// through [`Self::from_encoded`] — the wire shape is squib-private (D6).
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one match arm per curated sysreg — splitting hides the additive contract"
+    )]
     pub fn as_encoded(self) -> u64 {
-        Self::all()
-            .iter()
-            .position(|r| *r == self)
-            .map_or(0, |i| (i as u64) + 1)
+        match self {
+            // boot setup — block 1..=10
+            Self::SctlrEl1 => 1,
+            Self::Ttbr0El1 => 2,
+            Self::Ttbr1El1 => 3,
+            Self::MairEl1 => 4,
+            Self::AmairEl1 => 5,
+            Self::TcrEl1 => 6,
+            Self::SpEl1 => 7,
+            Self::ElrEl1 => 8,
+            Self::SpsrEl1 => 9,
+            Self::VbarEl1 => 10,
+            // ID registers — block 11..=18
+            Self::IdAa64Mmfr0El1 => 11,
+            Self::IdAa64Mmfr1El1 => 12,
+            Self::IdAa64Pfr0El1 => 13,
+            Self::IdAa64Pfr1El1 => 14,
+            Self::IdAa64Dfr0El1 => 15,
+            Self::IdAa64Isar0El1 => 16,
+            Self::IdAa64Isar1El1 => 17,
+            Self::MpidrEl1 => 18,
+            // generic timers — block 19..=25
+            Self::CntvCtlEl0 => 19,
+            Self::CntvCvalEl0 => 20,
+            Self::CntvOffEl2 => 21,
+            Self::CntFrqEl0 => 22,
+            Self::CntKctlEl1 => 23,
+            Self::CntpCtlEl0 => 24,
+            Self::CntpCvalEl0 => 25,
+            // PMU — block 26..=32
+            Self::PmCcntrEl0 => 26,
+            Self::PmCcfiltrEl0 => 27,
+            Self::PmUserEnrEl0 => 28,
+            Self::PmCrEl0 => 29,
+            Self::PmCntEnSetEl0 => 30,
+            Self::PmOvsSetEl0 => 31,
+            Self::PmSelrEl0 => 32,
+            // exceptions — block 33..=36
+            Self::EsrEl1 => 33,
+            Self::FarEl1 => 34,
+            Self::Afsr0El1 => 35,
+            Self::Afsr1El1 => 36,
+            // memory model / TLB — block 37..=41
+            Self::ContextIdrEl1 => 37,
+            Self::TpidrEl0 => 38,
+            Self::TpidrroEl0 => 39,
+            Self::TpidrEl1 => 40,
+            Self::ParEl1 => 41,
+            // FP/SIMD — block 42..=44
+            Self::Fpcr => 42,
+            Self::Fpsr => 43,
+            Self::CpacrEl1 => 44,
+            // debug — block 45..=47
+            Self::MdscrEl1 => 45,
+            Self::OslarEl1 => 46,
+            Self::OsdlrEl1 => 47,
+        }
     }
 
     /// Inverse of [`Self::as_encoded`]. Returns `None` for keys not in the curated
     /// list (forward-compat: a state file from a future squib build that added
-    /// registers in the middle would surface as `None` and the loader rejects
+    /// registers we don't know about surfaces as `None` and the loader rejects
     /// with `SnapshotError::Incompatible`).
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one match arm per curated sysreg — splitting hides the additive contract"
+    )]
     pub fn from_encoded(key: u64) -> Option<Self> {
-        if key == 0 {
-            return None;
-        }
-        let idx = usize::try_from(key - 1).ok()?;
-        Self::all().get(idx).copied()
+        Some(match key {
+            1 => Self::SctlrEl1,
+            2 => Self::Ttbr0El1,
+            3 => Self::Ttbr1El1,
+            4 => Self::MairEl1,
+            5 => Self::AmairEl1,
+            6 => Self::TcrEl1,
+            7 => Self::SpEl1,
+            8 => Self::ElrEl1,
+            9 => Self::SpsrEl1,
+            10 => Self::VbarEl1,
+            11 => Self::IdAa64Mmfr0El1,
+            12 => Self::IdAa64Mmfr1El1,
+            13 => Self::IdAa64Pfr0El1,
+            14 => Self::IdAa64Pfr1El1,
+            15 => Self::IdAa64Dfr0El1,
+            16 => Self::IdAa64Isar0El1,
+            17 => Self::IdAa64Isar1El1,
+            18 => Self::MpidrEl1,
+            19 => Self::CntvCtlEl0,
+            20 => Self::CntvCvalEl0,
+            21 => Self::CntvOffEl2,
+            22 => Self::CntFrqEl0,
+            23 => Self::CntKctlEl1,
+            24 => Self::CntpCtlEl0,
+            25 => Self::CntpCvalEl0,
+            26 => Self::PmCcntrEl0,
+            27 => Self::PmCcfiltrEl0,
+            28 => Self::PmUserEnrEl0,
+            29 => Self::PmCrEl0,
+            30 => Self::PmCntEnSetEl0,
+            31 => Self::PmOvsSetEl0,
+            32 => Self::PmSelrEl0,
+            33 => Self::EsrEl1,
+            34 => Self::FarEl1,
+            35 => Self::Afsr0El1,
+            36 => Self::Afsr1El1,
+            37 => Self::ContextIdrEl1,
+            38 => Self::TpidrEl0,
+            39 => Self::TpidrroEl0,
+            40 => Self::TpidrEl1,
+            41 => Self::ParEl1,
+            42 => Self::Fpcr,
+            43 => Self::Fpsr,
+            44 => Self::CpacrEl1,
+            45 => Self::MdscrEl1,
+            46 => Self::OslarEl1,
+            47 => Self::OsdlrEl1,
+            _ => return None,
+        })
     }
 
     /// All curated sysregs, in canonical order. The order is the additive contract: new
@@ -254,7 +363,24 @@ mod tests {
     #[test]
     fn test_should_reject_zero_and_out_of_range_encoded_keys() {
         assert_eq!(SysReg::from_encoded(0), None);
-        let beyond = (SysReg::all().len() as u64) + 1;
+        // The wire-encoding is hand-assigned and currently dense up to `all().len()`. A
+        // key one past the dense range is the canonical "unknown to this squib" sentinel —
+        // future variants may extend the dense block, but a value picked far beyond
+        // (a million) is guaranteed to be unrecognised by every published wire schema.
+        assert_eq!(SysReg::from_encoded(1_000_000), None);
+        let beyond = u64::try_from(SysReg::all().len()).expect("len fits in u64") + 1;
         assert_eq!(SysReg::from_encoded(beyond), None);
+    }
+
+    #[test]
+    fn test_should_assign_distinct_wire_constants_per_variant() {
+        let mut seen = std::collections::BTreeSet::new();
+        for reg in SysReg::all() {
+            let key = reg.as_encoded();
+            assert!(
+                seen.insert(key),
+                "duplicate wire constant {key} hit twice (second hit: {reg:?})"
+            );
+        }
     }
 }

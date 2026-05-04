@@ -1,7 +1,10 @@
 CARGO ?= cargo
 ENTITLEMENTS := apps/squib/squib.entitlements
 ENTITLEMENTS_BRIDGED := apps/squib/squib-bridged.entitlements
-TARGET_DIR := $(shell $(CARGO) metadata --format-version 1 --no-deps | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')
+# `cargo metadata` → `jq` instead of `python3`; jq is already a hard requirement
+# for `make hvf-test` / `make vmnet-test`, so we get one less interpreter on
+# the critical path.
+TARGET_DIR := $(shell $(CARGO) metadata --format-version 1 --no-deps | jq -r '.target_directory')
 SQUIB_BIN := $(TARGET_DIR)/aarch64-apple-darwin/release/squib
 SQUIB_JAIL_BIN := $(TARGET_DIR)/aarch64-apple-darwin/release/squib-jail
 
@@ -146,6 +149,14 @@ vmnet-test:
 	@$(CARGO) test -p squib-net --tests -- --nocapture --include-ignored
 
 # End-to-end smoke for the Phase 5 snapshot subsystem.
+# Live cross-filesystem rejection test for I-SNAP-3. Mounts a `hdiutil`
+# RAM disk and asserts that `save` rejects when the destination crosses
+# filesystems. The test is `#[ignore]`'d in plain `cargo test` because it
+# needs hdiutil + an ephemeral mount; this target opts in.
+snapshot-cross-fs-test:
+	@$(CARGO) test -p squib-snapshot --test integration -- --ignored \
+	  cross_filesystem_save_rejects_when_dest_is_on_a_separate_ramdisk
+
 # Generates a real <id>.snap + <id>.mem pair under /tmp via the live save
 # pipeline (bitcode envelope, CRC64 trailer, atomic temp-file + fsync + rename),
 # then exercises the squib binary's `--describe-snapshot` flag against it.
@@ -170,7 +181,7 @@ snapshot-smoke:
 # To produce a notarizable .pkg, set SIGN_ID to a Developer ID Installer
 # identity hash before invoking; the default ad-hoc identity makes the
 # .pkg installable but not notarizable.
-PKG_OUT := $(TARGET_DIR)/aarch64-apple-darwin/release/squib-$(shell $(CARGO) metadata --format-version 1 --no-deps | python3 -c 'import sys, json; print(json.load(sys.stdin)["packages"][0]["version"])').pkg
+PKG_OUT := $(TARGET_DIR)/aarch64-apple-darwin/release/squib-$(shell $(CARGO) metadata --format-version 1 --no-deps | jq -r '.packages[0].version').pkg
 
 pkg: sign-all
 	@SIGN_ID=$(SIGN_ID) ./dist/pkg/build-pkg.sh

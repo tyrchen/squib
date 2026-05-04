@@ -28,8 +28,13 @@ class Squib < Formula
   def install
     # Build both release binaries. The workspace is configured for
     # `aarch64-apple-darwin` via `.cargo/config.toml`, so the standard
-    # cargo invocation hits the right target.
-    system "cargo", "build", "--release", "--bin", "squib", "--bin", "squib-jail"
+    # cargo invocation hits the right target. `--locked` enforces that
+    # `Cargo.lock` (committed) is the only resolution graph used at
+    # install time; per `specs/70-security.md` § 10 (Supply chain) it's
+    # the only thing that prevents a yanked transitive crate sneaking
+    # in between formula publish and the user's brew install.
+    system "cargo", "build", "--release", "--locked",
+           "--bin", "squib", "--bin", "squib-jail"
 
     bin.install "target/aarch64-apple-darwin/release/squib"
     bin.install "target/aarch64-apple-darwin/release/squib-jail"

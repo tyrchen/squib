@@ -142,7 +142,7 @@ fn test_reference_vm_boots_linux_and_curls_mmds() {
             pl011_sink: Box::new(sink.clone()),
             mmds_size_cap: 8192,
             block: None,
-            net: Some(NetSpec::loopback("eth0", "tap0")),
+            net: Some(NetSpec::loopback("eth0", "tap0").unwrap()),
             enable_console: false,
         },
     )

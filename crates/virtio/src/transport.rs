@@ -387,6 +387,9 @@ mod tests {
         config: Vec<u8>,
         activated: bool,
         notifications: Vec<u16>,
+        /// When set, `activate` returns an error — used to drive the
+        /// `DEVICE_NEEDS_RESET` test below.
+        fail_activate: bool,
     }
 
     impl StubDevice {
@@ -398,6 +401,7 @@ mod tests {
                 config: vec![0xAA; 16],
                 activated: false,
                 notifications: Vec::new(),
+                fail_activate: false,
             }
         }
     }
@@ -443,6 +447,11 @@ mod tests {
             _mem: Arc<dyn GuestMemory>,
             _irq: IrqLine,
         ) -> Result<(), ActivateError> {
+            if self.fail_activate {
+                return Err(ActivateError::Other(
+                    "stub-injected activation failure".to_string(),
+                ));
+            }
             self.activated = true;
             Ok(())
         }
@@ -519,6 +528,47 @@ mod tests {
         // Page 1 must include VERSION_1 even if the device doesn't.
         write32(&mut t, 0x14, 1);
         assert_eq!(read32(&mut t, 0x10), 1); // bit 32 → bit 0 of page 1.
+    }
+
+    /// Per virtio v1.2 § 2.1.6 — when the device cannot complete activation, the
+    /// transport surfaces this to the driver by OR-ing `DEVICE_NEEDS_RESET` into
+    /// the status register. The driver-init state-machine bits remain set so the
+    /// driver can distinguish "I drove the state machine correctly but the device
+    /// rejected activation" from "I made an invalid transition".
+    #[test]
+    fn test_should_or_device_needs_reset_when_activation_fails() {
+        let dev = Arc::new(Mutex::new({
+            let mut d = StubDevice::new();
+            d.fail_activate = true;
+            d
+        }));
+        let dev_dyn: Arc<Mutex<dyn VirtioDevice>> = dev.clone();
+        let mem: Arc<dyn GuestMemory> = Arc::new(SliceGuestMemory::new(GuestAddress(0), 0x1_0000));
+        let gic: Arc<dyn Gic + Send + Sync> = Arc::new(StubGic);
+        let irq = IrqLine::new(gic, IntId::from_spi_cell(16).unwrap());
+        let mut t = VirtioMmioTransport::new(dev_dyn, mem, irq);
+
+        write32(&mut t, 0x70, ACKNOWLEDGE);
+        write32(&mut t, 0x70, ACKNOWLEDGE | DRIVER);
+        write32(&mut t, 0x70, ACKNOWLEDGE | DRIVER | FEATURES_OK);
+        write32(&mut t, 0x70, ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK);
+
+        // Activation was attempted: stub returned Err, so the device is not
+        // marked activated and the status register OR's in DEVICE_NEEDS_RESET.
+        assert!(!dev.lock().activated, "stub-Err must keep activated=false");
+        let status = read32(&mut t, 0x70);
+        assert!(
+            status & device_status::DEVICE_NEEDS_RESET != 0,
+            "DEVICE_NEEDS_RESET must be set on activation failure, got {status:#x}"
+        );
+        // The driver-init bits remain set so the driver sees the full
+        // `(ACK | DRIVER | FEATURES_OK | DRIVER_OK | DEVICE_NEEDS_RESET)` shape
+        // virtio v1.2 § 2.1 § 2.1.6 prescribes.
+        assert_eq!(
+            status,
+            ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK | device_status::DEVICE_NEEDS_RESET,
+            "status must carry init-machine bits + DEVICE_NEEDS_RESET",
+        );
     }
 
     #[test]

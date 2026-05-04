@@ -10,6 +10,7 @@
 //! - `rx_rate_limiter`, `tx_rate_limiter` — passthrough validated structurally.
 
 use serde::{Deserialize, Serialize};
+use squib_core::HostDevName;
 
 use super::common::{IfaceId, MacAddr};
 
@@ -39,7 +40,9 @@ pub struct NetworkInterfaceConfig {
     /// Validated interface ID.
     pub iface_id: IfaceId,
     /// Caller-requested host device name (informational; the vmnet handle is derived).
-    pub host_dev_name: String,
+    /// Wrapped in [`HostDevName`] so downstream consumers (`squib-vmm::NetSpec`) cannot
+    /// re-introduce an unvalidated `String` by accident.
+    pub host_dev_name: HostDevName,
     /// Validated guest MAC; `None` requests auto-generation downstream.
     pub guest_mac: Option<MacAddr>,
     /// RX rate limiter passthrough.
@@ -48,35 +51,19 @@ pub struct NetworkInterfaceConfig {
     pub tx_rate_limiter: Option<serde_json::Value>,
 }
 
-fn validate_host_dev_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Invalid host_dev_name: must not be empty".into());
-    }
-    if name.len() > 64 {
-        return Err(format!(
-            "Invalid host_dev_name: exceeds 64 bytes (got {} bytes)",
-            name.len()
-        ));
-    }
-    if name.contains('\0') {
-        return Err("Invalid host_dev_name: must not contain NUL bytes".into());
-    }
-    Ok(())
-}
-
 impl TryFrom<RawNetworkInterfaceConfig> for NetworkInterfaceConfig {
     type Error = String;
 
     fn try_from(raw: RawNetworkInterfaceConfig) -> Result<Self, Self::Error> {
         let iface_id = IfaceId::new(raw.iface_id)?;
-        validate_host_dev_name(&raw.host_dev_name)?;
+        let host_dev_name = HostDevName::new(raw.host_dev_name).map_err(|e| e.to_string())?;
         let guest_mac = match raw.guest_mac {
             Some(s) => Some(MacAddr::parse(&s)?),
             None => None,
         };
         Ok(Self {
             iface_id,
-            host_dev_name: raw.host_dev_name,
+            host_dev_name,
             guest_mac,
             rx_rate_limiter: raw.rx_rate_limiter,
             tx_rate_limiter: raw.tx_rate_limiter,

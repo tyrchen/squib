@@ -65,7 +65,7 @@ This mirrors the alioth/libkrun layout with squib-specific names. Each crate has
         squib-core (zero deps; the bottom of the graph)
 ```
 
-The `squib-core` crate has zero workspace dependencies and only the lightest external ones (`thiserror`, `serde`, `smallvec`). Every other crate transitively depends on it.
+The `squib-core` crate has zero **squib-workspace** dependencies and only the lightest external ones (`thiserror`, `serde`, `smallvec`). Every other crate transitively depends on it. The "no workspace deps" half of I-CRATE-1 is the load-bearing half: it's what keeps the dependency DAG acyclic.
 
 `squib-hv` is the only crate that links `applevisor`. `squib-net` is the only crate that opens an `unsafe` block for `vmnet`. `#![forbid(unsafe_code)]` everywhere else.
 
@@ -183,7 +183,7 @@ Per CLAUDE.md § Toolchain & Build, `cargo clippy -- -D warnings` is gating CI.
 
 | # | Invariant | Pinned by |
 |---|-----------|-----------|
-| I-CRATE-1 | `squib-core` has no workspace dependencies. | CI grep over `crates/core/Cargo.toml` |
+| I-CRATE-1 | `squib-core` has no squib-workspace dependencies (and only minimal external deps — `serde`, `smallvec`, `thiserror`). | CI grep over `crates/core/Cargo.toml` |
 | I-CRATE-2 | `unsafe` blocks live only in `squib-hv` and `squib-net::sys`. | `#![forbid(unsafe_code)]` in every other crate; CI grep |
 | I-CRATE-3 | `vmm-sys-util`, `kvm-*`, `vhost-*`, `seccompiler` are not in the dependency graph. | `cargo-deny` ban list |
 | I-CRATE-4 | `applevisor` is consumed only by `squib-hv`. | `cargo-deny` ban list with `wrappers` allowlist |

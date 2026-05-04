@@ -16,10 +16,30 @@ workspace = true
 [[bin]]
 name = "squib-jail"
 path = "src/main.rs"
+# squib-jail relies on Darwin-specific syscalls (`sandbox_init(3)`, the
+# Apple `setrlimit` resource flavour, BSD ID-management calls). On non-macOS
+# targets the binary would link but its launch sequence is a no-op stub —
+# producing a no-op binary by default obscures bugs. Gating the [[bin]]
+# means a Linux build of the workspace never produces an unusable artefact.
+required-features = ["macos"]
+
+[features]
+default = ["macos"]
+# Builds the squib-jail binary. Only meaningful on `target_os = "macos"`;
+# off-target the [[bin]] is hidden so `cargo build --workspace` on Linux
+# still succeeds without mapping a useless binary into the release dir.
+macos = []
 
 [dependencies]
 clap = { workspace = true }
 libc = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+# squib-jail is a sub-100ms one-shot launcher — it emits at most a handful
+# of warning-level lines, so the workspace `tracing-subscriber` JSON / ANSI
+# / chrono features are pure binary bloat. Override to the smallest feature
+# set that keeps env-filter + the human-readable formatter we use.
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+  "env-filter",
+  "fmt",
+] }

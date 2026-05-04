@@ -26,6 +26,15 @@
 //! favours `BTreeMap` for cache locality and ordered range queries. The
 //! per-device `Mutex` is `parking_lot::Mutex` because we never `Send` a guard
 //! across an await point and want the cheaper, no-poison semantics.
+//!
+//! ### Lockless dispatch
+//!
+//! The bus is built once at boot via [`BusBuilder`] and then frozen into an
+//! immutable [`Bus`] whose [`Bus::read`] / [`Bus::write`] dispatch path takes
+//! `&BTreeMap` directly — **no lock on the MMIO hot path**. Every guest exit
+//! pays one map lookup + one device-mutex acquire, no `RwLock::read()`. With
+//! 32+ virtio MMIO slots and millions of MMIO exits per second on a busy guest,
+//! the saved `RwLock` round-trip is ~5–10 ns per exit (Phase 3 review finding).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -34,7 +43,7 @@ mod range;
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use thiserror::Error;
 
 pub use crate::range::BusRange;
@@ -90,18 +99,20 @@ pub enum BusError {
     },
 }
 
-/// MMIO address-space router.
+/// Boot-time mutable bus builder. Use [`Self::insert`] to register devices, then
+/// [`Self::build`] to freeze into an [`Arc<Bus>`] whose dispatch path is lockless.
 ///
-/// See the crate-level documentation for the design contract; in short, this
-/// is a `BTreeMap<BusRange, Arc<Mutex<dyn BusDevice>>>` with overlap rejection
-/// on insert and a `range(..=key).next_back()` lookup on dispatch.
+/// The split-phase shape (mutable build → immutable dispatch) is exactly what
+/// `specs/14-virtio-and-devices.md § 2` calls out: insert during boot, dispatch
+/// during run. Removing the `RwLock` from the dispatch path saves ~5–10 ns per
+/// MMIO exit.
 #[derive(Debug, Default)]
-pub struct Bus {
-    devices: RwLock<BTreeMap<BusRange, Arc<Mutex<dyn BusDevice>>>>,
+pub struct BusBuilder {
+    devices: BTreeMap<BusRange, Arc<Mutex<dyn BusDevice>>>,
 }
 
-impl Bus {
-    /// Build an empty bus.
+impl BusBuilder {
+    /// Build an empty `BusBuilder`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -114,14 +125,13 @@ impl Bus {
     /// - [`BusError::RangeOverflow`] if `base + len` overflows.
     /// - [`BusError::Overlap`] if the new range overlaps an existing one.
     pub fn insert(
-        &self,
+        &mut self,
         device: Arc<Mutex<dyn BusDevice>>,
         base: u64,
         len: u64,
     ) -> Result<(), BusError> {
         let new_range = BusRange::new(base, len)?;
-        let mut guard = self.devices.write();
-        for existing in guard.keys() {
+        for existing in self.devices.keys() {
             if existing.overlaps(&new_range) {
                 return Err(BusError::Overlap {
                     existing: *existing,
@@ -130,20 +140,54 @@ impl Bus {
         }
         // Insert is unique by construction: the overlap check above also
         // catches exact-same-range duplicates.
-        guard.insert(new_range, device);
+        self.devices.insert(new_range, device);
         Ok(())
     }
 
+    /// Freeze the builder into a lockless dispatch-side [`Bus`].
+    #[must_use]
+    pub fn build(self) -> Arc<Bus> {
+        Arc::new(Bus {
+            devices: self.devices,
+        })
+    }
+
+    /// Number of devices registered so far.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// `true` if no devices are registered yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.devices.is_empty()
+    }
+}
+
+/// MMIO address-space router (post-boot, immutable).
+///
+/// See the crate-level documentation for the design contract; in short, this
+/// is a `BTreeMap<BusRange, Arc<Mutex<dyn BusDevice>>>` frozen at boot and
+/// shared across vCPU threads via `Arc<Bus>`. The dispatch path takes the
+/// inner map by reference — no lock — and only the per-device `Mutex` is
+/// taken for the actual handler call.
+#[derive(Debug)]
+pub struct Bus {
+    devices: BTreeMap<BusRange, Arc<Mutex<dyn BusDevice>>>,
+}
+
+impl Bus {
     /// Number of devices currently registered.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.devices.read().len()
+        self.devices.len()
     }
 
     /// `true` if no devices are registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.devices.read().is_empty()
+        self.devices.is_empty()
     }
 
     /// Forward a read at `addr` to the device that owns the covering range.
@@ -172,11 +216,11 @@ impl Bus {
     /// Look up the device covering `addr`. Returns `(offset_within_range,
     /// device_handle)` on success.
     fn resolve(&self, addr: u64) -> Result<(u64, Arc<Mutex<dyn BusDevice>>), BusError> {
-        let guard = self.devices.read();
         // A range whose base is <= addr is a candidate; the largest such base
         // is the only one that can contain addr (BTreeMap is sorted by base).
         let probe = BusRange::probe(addr);
-        let (range, dev) = guard
+        let (range, dev) = self
+            .devices
             .range(..=probe)
             .next_back()
             .ok_or(BusError::NoDevice { addr })?;
@@ -224,48 +268,50 @@ mod tests {
 
     #[test]
     fn test_should_reject_zero_length_insert() {
-        let bus = Bus::new();
-        let err = bus.insert(dev(), 0x1000, 0).unwrap_err();
+        let mut b = BusBuilder::new();
+        let err = b.insert(dev(), 0x1000, 0).unwrap_err();
         assert!(matches!(err, BusError::ZeroLengthRange));
     }
 
     #[test]
     fn test_should_reject_range_overflow() {
-        let bus = Bus::new();
-        let err = bus.insert(dev(), u64::MAX, 2).unwrap_err();
+        let mut b = BusBuilder::new();
+        let err = b.insert(dev(), u64::MAX, 2).unwrap_err();
         assert!(matches!(err, BusError::RangeOverflow));
     }
 
     #[test]
     fn test_should_register_disjoint_devices() {
-        let bus = Bus::new();
-        bus.insert(dev(), 0x0F00_0000, 0x1000).unwrap();
-        bus.insert(dev(), 0x0F00_1000, 0x1000).unwrap();
-        bus.insert(dev(), 0x0E0A_0000, 0x1000).unwrap(); // PL011
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x0F00_0000, 0x1000).unwrap();
+        b.insert(dev(), 0x0F00_1000, 0x1000).unwrap();
+        b.insert(dev(), 0x0E0A_0000, 0x1000).unwrap(); // PL011
+        let bus = b.build();
         assert_eq!(bus.len(), 3);
     }
 
     #[test]
     fn test_should_reject_overlap_at_boundary() {
-        let bus = Bus::new();
-        bus.insert(dev(), 0x1000, 0x1000).unwrap();
-        let err = bus.insert(dev(), 0x1FFF, 0x10).unwrap_err();
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x1000, 0x1000).unwrap();
+        let err = b.insert(dev(), 0x1FFF, 0x10).unwrap_err();
         assert!(matches!(err, BusError::Overlap { .. }));
     }
 
     #[test]
     fn test_should_reject_exact_same_range() {
-        let bus = Bus::new();
-        bus.insert(dev(), 0x1000, 0x1000).unwrap();
-        let err = bus.insert(dev(), 0x1000, 0x1000).unwrap_err();
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x1000, 0x1000).unwrap();
+        let err = b.insert(dev(), 0x1000, 0x1000).unwrap_err();
         assert!(matches!(err, BusError::Overlap { .. }));
     }
 
     #[test]
     fn test_should_dispatch_read_to_owner_with_relative_offset() {
-        let bus = Bus::new();
+        let mut b = BusBuilder::new();
         let device = dev();
-        bus.insert(Arc::clone(&device), 0x1000, 0x1000).unwrap();
+        b.insert(Arc::clone(&device), 0x1000, 0x1000).unwrap();
+        let bus = b.build();
         let mut buf = [0u8; 4];
         bus.read(0x1004, &mut buf).unwrap();
         assert_eq!(buf, [4, 5, 6, 7]);
@@ -277,13 +323,14 @@ mod tests {
         // can inspect its captured state after the bus dispatches through
         // `Arc<Mutex<dyn BusDevice>>`.
         let recorder: Arc<Mutex<RecorderDevice>> = Arc::new(Mutex::new(RecorderDevice::default()));
-        let bus = Bus::new();
-        bus.insert(
+        let mut b = BusBuilder::new();
+        b.insert(
             Arc::clone(&recorder) as Arc<Mutex<dyn BusDevice>>,
             0x1000,
             0x1000,
         )
         .unwrap();
+        let bus = b.build();
         bus.write(0x1004, &[0xAA, 0xBB]).unwrap();
         let captured = recorder.lock().writes.clone();
         // The dispatched offset must be device-relative, not bus-absolute.
@@ -292,8 +339,9 @@ mod tests {
 
     #[test]
     fn test_should_return_no_device_for_unmapped_address() {
-        let bus = Bus::new();
-        bus.insert(dev(), 0x1000, 0x100).unwrap();
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x1000, 0x100).unwrap();
+        let bus = b.build();
         let mut buf = [0u8; 4];
         let err = bus.read(0x2000, &mut buf).unwrap_err();
         assert!(matches!(err, BusError::NoDevice { addr } if addr == 0x2000));
@@ -304,9 +352,9 @@ mod tests {
         // Replicate the shape of the squib MMIO map: 32 virtio slots followed
         // by PL011. Each lookup must land on the right device — a read of
         // slot 5 must not bump PL011's recorder.
-        let bus = Bus::new();
+        let mut b = BusBuilder::new();
         let pl011 = Arc::new(Mutex::new(RecorderDevice::default()));
-        bus.insert(
+        b.insert(
             Arc::clone(&pl011) as Arc<Mutex<dyn BusDevice>>,
             0x0E0A_0000,
             0x1000,
@@ -316,16 +364,17 @@ mod tests {
         for slot in 0..32u64 {
             let base = 0x0F00_0000 + slot * 0x1000;
             if slot == 5 {
-                bus.insert(
+                b.insert(
                     Arc::clone(&slot5) as Arc<Mutex<dyn BusDevice>>,
                     base,
                     0x1000,
                 )
                 .unwrap();
             } else {
-                bus.insert(dev(), base, 0x1000).unwrap();
+                b.insert(dev(), base, 0x1000).unwrap();
             }
         }
+        let bus = b.build();
         let mut buf = [0u8; 4];
         bus.read(0x0E0A_0010, &mut buf).unwrap();
         bus.read(0x0F00_5008, &mut buf).unwrap();
@@ -338,8 +387,9 @@ mod tests {
         // Edge case for the `range(..=).next_back()` lookup: an address
         // strictly greater than the last range's end must not match the last
         // range.
-        let bus = Bus::new();
-        bus.insert(dev(), 0x1000, 0x100).unwrap();
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x1000, 0x100).unwrap();
+        let bus = b.build();
         let mut buf = [0u8; 1];
         let err = bus.read(0x1100, &mut buf).unwrap_err();
         assert!(matches!(err, BusError::NoDevice { .. }));
@@ -347,10 +397,26 @@ mod tests {
 
     #[test]
     fn test_should_return_no_device_for_address_below_first_range() {
-        let bus = Bus::new();
-        bus.insert(dev(), 0x1000, 0x100).unwrap();
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x1000, 0x100).unwrap();
+        let bus = b.build();
         let mut buf = [0u8; 1];
         let err = bus.read(0x0FFF, &mut buf).unwrap_err();
         assert!(matches!(err, BusError::NoDevice { .. }));
+    }
+
+    #[test]
+    fn test_should_freeze_via_builder_into_arc_bus() {
+        let mut b = BusBuilder::new();
+        b.insert(dev(), 0x1000, 0x100).unwrap();
+        assert_eq!(b.len(), 1);
+        let bus: Arc<Bus> = b.build();
+        assert_eq!(bus.len(), 1);
+        // Multiple consumers can share the dispatch surface; the locking-free
+        // hot path is the whole point of the BusBuilder split.
+        let bus2 = Arc::clone(&bus);
+        let mut buf = [0u8; 1];
+        assert!(bus.read(0x1010, &mut buf).is_ok());
+        assert!(bus2.read(0x1020, &mut buf).is_ok());
     }
 }

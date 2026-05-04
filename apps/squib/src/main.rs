@@ -76,6 +76,25 @@ async fn main() -> Result<()> {
              /usr/local/libexec/squib/gvproxy"
         );
     }
+    // `--bridged-iface` is only meaningful in bridged mode; warn (don't fail) so
+    // an operator who left the flag in a script can still use `--network=shared`
+    // for everyday testing without surfacing a hard error.
+    // Bridged-only knob: only meaningful when the `bridged` cargo feature is on AND the
+    // operator selected `--network=bridged`. In every other build / mode, surface a one-
+    // shot warning so a stray flag doesn't silently disappear into the void.
+    #[cfg(feature = "bridged")]
+    let is_bridged = matches!(
+        net_mode,
+        squib_net::NetMode::Vmnet(squib_net::VmnetMode::Bridged)
+    );
+    #[cfg(not(feature = "bridged"))]
+    let is_bridged = false;
+    if args.bridged_iface.is_some() && !is_bridged {
+        warn!(
+            iface = ?args.bridged_iface,
+            "--bridged-iface ignored: only effective when --network=bridged",
+        );
+    }
 
     let snapshot = ControllerSnapshot::new(
         args.id.clone(),

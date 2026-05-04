@@ -2,7 +2,7 @@
 title: 93-improvements-review — deferred-findings backlog
 type: review
 status: draft
-last_updated: 2026-05-03
+last_updated: 2026-05-04
 depends_on: 91-impl-plan.md
 ---
 
@@ -12,11 +12,75 @@ The single home for review findings that surfaced during a phase but are out-of-
 
 Entries are append-only. When a deferred item is fixed, **strike it through** rather than removing — the historical decision matters for future contributors.
 
+## Resolved in the 2026-05-04 cleanup pass
+
+Sweeping pass after every phase landed. Each line names the originally-cited entry plus the resolution shape; the original entries are struck through in place below.
+
+### Phase 1
+- **P3 spec** (`13` § 4): dropped `far` from `EsrDecoded::DataAbort`; added a one-line note that FAR_EL2 is read separately and threaded onto the data-abort exit envelope downstream.
+- **P3 spec** (`61` § 3 + I-CRATE-1): clarified the invariant to "no squib-workspace deps + minimal external deps" — the no-workspace half remains the load-bearing half.
+- **P3 code** (`crates/fdt/src/lib.rs:287`): replaced `expect()` on masked arithmetic with an explicit `as`-cast plus a `// reason = …` lint allow. No production-path `expect` reachable from `add_cpus`.
+- **P2 code** (`crates/loader/src/lib.rs`): added defence-in-depth `enforce_path_bounds()` (PATH_MAX = 1024, NUL-byte rejection) before the first `std::fs` call in `load_from_path_with_caps`; new `LoaderError::PathRejected` variant. The API-layer `SafePath` remains the canonical boundary; the loader is now also correct in isolation.
+
+### Phase 2
+- **P3 spec** (`21` /balloon/hinting row): pinned `BalloonHintingOp` vocabulary (`start | status | stop`) inline with a citation to `crates/api/src/schemas/balloon.rs::BalloonHintingOp`.
+- **P3 deps** (workspace `Cargo.toml`): dropped the unused `validator` workspace dep + the `squib-api` adoption stub. The hand-rolled `Raw* → Validated TryFrom` pattern in `crates/api/src/schemas/` covers the same checks; nothing else in the workspace adopted it.
+- **P2 code** (`crates/api/src/controller.rs::RuntimeApiController`): added `LimitsState` (host RAM cap, current `mem_size_mib`, per-class running counts) + `validate_cross_field()` invoked from `dispatch` before the channel is touched. Counters bump only on a non-fault VMM response (a stub-VMM rejection no longer consumes a slot). `cross_check_balloon` defers to boot when `mem_size_mib` is unset, matching upstream Firecracker's accept-then-validate-at-start semantics.
+
+### Phase 3
+- **P2 spec** (`14` § 6 / I-DEV-4): amended to read "either exactly N `Vm::map_memory`/`Vm::unmap_memory` calls **or** one coalesced call covering N × BLOCK_SIZE" — the merged shape is preferable on Apple Silicon (one stage-2 TLB invalidate vs N) and is what the existing `test_should_plug_n_blocks_in_a_single_backend_call` documents.
+- **P2 code** (`crates/virtio/src/transport.rs::tests`): added `test_should_or_device_needs_reset_when_activation_fails` driving the device past `DRIVER_OK` with a stub-Err `activate()` and asserting `(ACK | DRIVER | FEATURES_OK | DRIVER_OK | DEVICE_NEEDS_RESET)`.
+- **P2 code** (`crates/bus/src/lib.rs`): replaced `RwLock<BTreeMap<…>>` with a split-phase `BusBuilder → Arc<Bus>`; the dispatch path now takes `&BTreeMap` directly. Saves ~5–10 ns per MMIO exit (Phase 3 review finding). All callers (`crates/vmm/src/device_manager.rs`, `crates/vmm/tests/runner_hvf_smoke.rs`) updated.
+- **P3 code** (`crates/mmds/src/token.rs`): replaced the hand-rolled `base64url_no_pad` (~30 LOC) with `base64::engine::general_purpose::URL_SAFE_NO_PAD`; added `base64 = "0.22"` to `[workspace.dependencies]`.
+- **P3 dec** (virtio VENDOR_ID = 0): tracked. No code change — squib mirrors upstream Firecracker's pre-Red-Hat encoding, and parity with the compat suite is what matters.
+
+### Phase 4
+- **P2 code** (snapshot tests): added `host_dev_name_round_trips_through_save_restore` planting a synthetic virtio-net `DeviceState` blob with embedded `host_dev_name` bytes; asserts byte-equal blob round-trip after `save`/`load`. Pins I-NET-3.
+- **P3 code** (`crates/core/src/identifiers.rs`): introduced `HostDevName` newtype (≤64 B, no NUL, serde-transparent) — threaded through `crates/api/src/schemas/network.rs::NetworkInterfaceConfig` and `crates/vmm/src/device_manager.rs::NetSpec`. The chained validation no longer relies on the field type being `String`.
+- **P3 code** (`apps/squib/src/cli.rs::Args::bridged_iface`): added `--bridged-iface <IFNAME>` for `--network=bridged`. Warn-and-continue when set with a non-bridged mode.
+
+### Phase 5
+- **P2 code** (`crates/arch/src/sysregs.rs::as_encoded`/`from_encoded`): replaced the positional `position()+1` encoding with hand-assigned per-variant constants (1..=47). Reordering `SysReg::all()` no longer silently re-keys the wire format. Added `test_should_assign_distinct_wire_constants_per_variant`.
+- **P2 code** (snapshot integration tests): added `diff_round_trip_property_sweep_over_random_dirty_patterns` — 12 trials × 3 (RAM, page) shapes, deterministic-LCG-seeded; asserts dirty pages carry the pattern byte and clean pages carry zero. Pins I-SNAP-2 without pulling in `proptest`.
+- **P3 code** (snapshot/host casts): replaced `as u64` / `as usize` at `crates/snapshot/src/state.rs:117` and `crates/host/src/pager.rs:181-185` with `try_from`-based widening; remaining casts are widening (no truncation possible) or in test-only code.
+- **P3 code** (`crates/snapshot/src/load.rs::infer_memory_path`): now accepts any extension (swaps to `.mem` regardless of the input stem). Operators with non-`.snap` naming get the matching hint.
+- **P3 test** (`make snapshot-cross-fs-test`): added `cross_filesystem_save_rejects_when_dest_is_on_a_separate_ramdisk` (macOS-only, `#[ignore]`'d by default) using `hdiutil attach -nomount ram://…` + `mount -t hfs`.
+
+### Phase 6
+- **P2 code** (`apps/squib-jail/src/cli.rs`): added per-flag byte caps via `clap::builder::TypedValueParser` chains (256 B for short fields, 1024 B for paths, 4 KiB per child argv element with a 16 KiB total cap).
+- **P2 code** (`apps/squib-jail/src/env.rs::stage`): chroot dir gets `fs::set_permissions(_, 0o755)` after `create_dir_all` (defeats whatever umask the launcher arrived with).
+- **P2 code** (`apps/squib-jail/src/env.rs::copy_via_nofollow`): TOCTOU-safe staging via `O_NOFOLLOW + fstat` — refuses to traverse a symlink that materialised between `canonicalize_exec_file` and `copy`.
+- **P2 code** (`apps/squib-jail/src/sequence.rs::daemonize`): standard double-fork prologue (fork → setsid → fork → grandchild execs). Defeats the `setsid → EPERM` failure on already-process-group-leader launchers.
+- **P3 code** (`apps/squib-jail/src/sequence.rs::exec`): `execv → execve` with a curated `envp` (PATH, LANG, LC_ALL only). Caller-side credentials no longer leak.
+- **P3 code** (`dist/homebrew/squib.rb:32`): added `--locked` to the cargo invocation.
+- **P3 code** (`dist/pkg/build-pkg.sh` + `Makefile`): replaced the inline `python3 -c '…json.load(sys.stdin)…'` with `jq -r '…'`. Drops one interpreter dep on minimal CI runners.
+- **P3 code** (`apps/squib-jail/Cargo.toml`): gated `[[bin]]` to `required-features = ["macos"]` so a non-macOS workspace build skips the binary outright; `tracing-subscriber` overridden to `default-features = false, features = ["env-filter", "fmt"]` (drops JSON/ANSI/chrono inflation).
+- **P3 code** (`apps/squib-jail/profiles/default.sb`): scoped `sysctl-read` to a name allowlist (`hw.optional.arm.FEAT_*`, `hw.{ncpu,memsize,…}`, `kern.{osversion,…}`); dropped the `com.apple.SystemConfiguration.configd` mach-lookup (vmnet handles its own configd).
+
+### Phase 7
+- **P2 code** (`crates/snapshot/Cargo.toml`, `crates/vmm/Cargo.toml`): `criterion` is now `optional = true` keyed off a `bench = ["dep:criterion"]` feature. Plain `cargo test -p squib-snapshot` no longer pulls criterion or its ~30 transitives.
+- **P2 tests** (`tests/firecracker-compat/tests/f_rows.rs`): added `f_get_balloon_statistics`, `f_patch_balloon_statistics`, `f_put_snapshot_create_returns_documented_stub_fault`, `f_put_snapshot_load_returns_documented_stub_fault`, `f_patch_vm_pause_post_boot`, `f_patch_vm_resume_post_boot`, `f_put_actions_instance_start_returns_documented_stub_fault`. The stubbed actions assert the exact `fault_message` text so the tests flip cleanly when Phase 1's tail lands.
+
+### Cross-phase items remaining deferred (verified, gated)
+
+These items in earlier phases stay deferred *because they require live HVF/Mach/perf testing on hardware that is out of scope for the cleanup pass*. The trait surfaces, mock fixtures, and skeletons are all in place; the live impls are gated on:
+
+- vCPU + GIC HVF capture/restore (`crates/snapshot/src/vcpu_save.rs` traits done; live impl over `applevisor::Vcpu` / `applevisor::Gic` is `make hvf-test`-gated).
+- HvfMemBackend wrapper for virtio-mem hotplug (gated on the live unmap/remap CI test).
+- `pager-live-mach` cargo feature (live `mach_msg(MACH_RCV_MSG)` loop + `task_swap_exception_ports` install + drift detection — gated on the LLDB-attach CI lane).
+- Block backend async engine + per-queue rate limiter (Phase 7 perf-tuning; gated on the concurrent-IOPS bench harness lane).
+- `Frame::Bytes` + `FramePool` refactor for I-NET-4 (multi-crate refactor; gated on the concurrent-flow bench lane surfacing the regression).
+- gvproxy bundling (waiting on an upstream-published binary release with a SHA-256 to pin under `vendors/gvproxy/`).
+- `iface_uuid_for` via `uuid::new_v5` (waiting on a second consumer to justify the workspace dep, per the original 93 fix-shape).
+- vmnet keyed callback registry: **resolved differently** — the `block2`-based per-call `Arc<StartContext>` shape already supports multi-NIC by construction; no global `ACTIVE_CONTEXT` exists.
+
+Phase-1-tail and Phase-3-tail (boot-to-busybox smoke + dumbo TCP/HTTP server) are **resolved**: Phase 1's commit `8ac7149` lands the vCPU thread spawn + kernel/initrd/FDT writes + PL011 emulation; Phase 3's commit `516c332` lands dumbo TCP/HTTP synthesis in `crates/mmds/src/interceptor.rs`.
+
 ## Phase 1 (lands at end of Phase 1.6)
 
 ### Spec inconsistencies
 
-- **P3** — `specs/13-arch-and-boot.md` § 4 declares `EsrDecoded::DataAbort { is_write, sas, srt, sf, far }` but the function signature on the same line is `decode(esr: u64) -> EsrDecoded` — the decoder cannot produce `far` from `esr` alone. The implementation in `crates/arch/src/esr.rs:84` omits `far` (FAR is read separately and threaded through to `Exit::Mmio` in `crates/hv/src/run_loop.rs:131`). Fix shape: amend 13 § 4 to drop `far` from `EsrDecoded::DataAbort` (it's already on the data-abort exit downstream).
+- ~~**P3** — `specs/13-arch-and-boot.md` § 4 declares `EsrDecoded::DataAbort { is_write, sas, srt, sf, far }` but the function signature on the same line is `decode(esr: u64) -> EsrDecoded` — the decoder cannot produce `far` from `esr` alone. The implementation in `crates/arch/src/esr.rs:84` omits `far` (FAR is read separately and threaded through to `Exit::Mmio` in `crates/hv/src/run_loop.rs:131`). Fix shape: amend 13 § 4 to drop `far` from `EsrDecoded::DataAbort` (it's already on the data-abort exit downstream).~~ — **resolved 2026-05-04**, see top of file.
 
 ### Trait-surface refactor (out-of-phase)
 
@@ -24,15 +88,15 @@ Entries are append-only. When a deferred item is fixed, **strike it through** ra
 
 ### Boundary input validation
 
-- **P2** — `crates/loader/src/lib.rs:286-289, 320-322` (`std::fs::metadata`, `std::fs::read`) trust a path supplied by the API layer. `specs/70-security.md` § 4 wants validate-at-the-boundary (length cap, NUL byte rejection, charset allowlist for any non-canonical fragment) and the API layer's `Raw<DriveConfig>::SafePath::new` is the canonical place. Fix shape: ensure every caller of `load_from_path` runs through `SafePath` first, and document the trust boundary in the loader's module doc.
+- ~~**P2** — `crates/loader/src/lib.rs:286-289, 320-322` (`std::fs::metadata`, `std::fs::read`) trust a path supplied by the API layer. `specs/70-security.md` § 4 wants validate-at-the-boundary (length cap, NUL byte rejection, charset allowlist for any non-canonical fragment) and the API layer's `Raw<DriveConfig>::SafePath::new` is the canonical place. Fix shape: ensure every caller of `load_from_path` runs through `SafePath` first, and document the trust boundary in the loader's module doc.~~ — **resolved 2026-05-04** (defence-in-depth `enforce_path_bounds`, plus module-doc trust-boundary section).
 
 ### Performance / hot-path
 
-- **P3** — `crates/fdt/src/lib.rs:287` uses `expect("...")` on masked arithmetic. The mask (`& 0x00FF_FFFF`) makes truncation impossible, but CLAUDE.md style says no `expect()` in production code. Fix shape: rewrite as `(mpidr & 0xFFFF) as u32` or precompute the truncated MPIDR once and panic-free.
+- ~~**P3** — `crates/fdt/src/lib.rs:287` uses `expect("...")` on masked arithmetic. The mask (`& 0x00FF_FFFF`) makes truncation impossible, but CLAUDE.md style says no `expect()` in production code. Fix shape: rewrite as `(mpidr & 0xFFFF) as u32` or precompute the truncated MPIDR once and panic-free.~~ — **resolved 2026-05-04**.
 
 ### Polished-but-not-blocking
 
-- **P3** — `crates/core` still depends on three external crates (`serde`, `smallvec`, `thiserror`). I-CRATE-1 in 61-crates-and-features.md says "no workspace dependencies"; external deps are not banned by the literal text. Fix shape: clarify the invariant in 61 to "no squib-crate workspace deps + minimal external deps".
+- ~~**P3** — `crates/core` still depends on three external crates (`serde`, `smallvec`, `thiserror`). I-CRATE-1 in 61-crates-and-features.md says "no workspace dependencies"; external deps are not banned by the literal text. Fix shape: clarify the invariant in 61 to "no squib-crate workspace deps + minimal external deps".~~ — **resolved 2026-05-04**.
 
 ## Boot-to-busybox smoke test (Phase 1 exit-criteria gap)
 
@@ -46,21 +110,21 @@ Entries are append-only. When a deferred item is fixed, **strike it through** ra
 
 ### Cross-field validation deferred to controller / Phase 3
 
-- **P2** — `MemSizeMib::new` (`crates/api/src/schemas/common.rs:289-301`) only enforces `>= 1`. [10-data-model.md § 2.3](./10-data-model.md#23-schema-layer) and [70-security.md § 4](./70-security.md#4-input-validation) require an upper bound against host RAM minus hypervisor overhead. The `BackendCapabilities` surface needed for that check lands with Phase 1's HVF backend. Fix shape: thread `BackendCapabilities` into the controller, add `MachineConfig::validate_against_host(...)` invoked at dispatch time before the action reaches the VMM event loop.
+- ~~**P2** — `MemSizeMib::new` (`crates/api/src/schemas/common.rs:289-301`) only enforces `>= 1`. [10-data-model.md § 2.3](./10-data-model.md#23-schema-layer) and [70-security.md § 4](./70-security.md#4-input-validation) require an upper bound against host RAM minus hypervisor overhead. The `BackendCapabilities` surface needed for that check lands with Phase 1's HVF backend. Fix shape: thread `BackendCapabilities` into the controller, add `MachineConfig::validate_against_host(...)` invoked at dispatch time before the action reaches the VMM event loop.~~ — **resolved 2026-05-04** (controller `LimitsState` + `validate_cross_field`; production wires `host_ram_mib` from live capabilities at controller-construction time).
 
-- **P2** — `BalloonConfig.amount_mib` upper bound (`mem_size_mib − 32`, the upstream `MAX_BALLOON_SIZE_MIB` rule from [21-api-compat-matrix.md § 2 `/balloon`](./21-api-compat-matrix.md#balloon-put)) is not enforced. `crates/api/src/schemas/balloon.rs:RawBalloonConfig` accepts any `u64`. The cross-field check requires the running `mem_size_mib`, so the controller needs to consult its own `vm_config` snapshot. Fix shape: same as above — controller-level cross-field validation gate at dispatch.
+- ~~**P2** — `BalloonConfig.amount_mib` upper bound (`mem_size_mib − 32`, the upstream `MAX_BALLOON_SIZE_MIB` rule from [21-api-compat-matrix.md § 2 `/balloon`](./21-api-compat-matrix.md#balloon-put)) is not enforced. `crates/api/src/schemas/balloon.rs:RawBalloonConfig` accepts any `u64`. The cross-field check requires the running `mem_size_mib`, so the controller needs to consult its own `vm_config` snapshot. Fix shape: same as above — controller-level cross-field validation gate at dispatch.~~ — **resolved 2026-05-04**.
 
-- **P2** — Per-class running-count caps (`drives:8`, `network_interfaces:8`, `pmem:4` from `common.rs:21-31`) are only enforced inside `replay.rs` for the static-config path. The HTTP per-PUT path has no running-set tracker yet. Phase 3 wires a device manager; the cap check belongs there. Fix shape: device manager in `squib-vmm` returns `BadRequest` with the spec's documented `fault_message` when a 9th drive is PUT.
+- ~~**P2** — Per-class running-count caps (`drives:8`, `network_interfaces:8`, `pmem:4` from `common.rs:21-31`) are only enforced inside `replay.rs` for the static-config path. The HTTP per-PUT path has no running-set tracker yet. Phase 3 wires a device manager; the cap check belongs there. Fix shape: device manager in `squib-vmm` returns `BadRequest` with the spec's documented `fault_message` when a 9th drive is PUT.~~ — **resolved 2026-05-04** (controller-side counters in `LimitsState`; bumps only on a non-fault VMM response).
 
 ### Validator-crate adoption stance
 
-- **P3** — `validator` crate is a workspace dep (`Cargo.toml:52`) but `squib-api` does not use it (the hand-rolled `Raw* → Validated TryFrom` covers the same checks). Either (a) drop the dep from the workspace if no other crate adopts it, or (b) add `#[derive(Validate)]` to `Raw*` shapes for documentation / lintability and call `.validate()` inside `try_from` ([10-data-model.md § 2.3](./10-data-model.md#23-schema-layer) explicitly endorses this layered pattern). Decision can wait until Phase 3 picks a crate-set.
+- ~~**P3** — `validator` crate is a workspace dep (`Cargo.toml:52`) but `squib-api` does not use it (the hand-rolled `Raw* → Validated TryFrom` covers the same checks). Either (a) drop the dep from the workspace if no other crate adopts it, or (b) add `#[derive(Validate)]` to `Raw*` shapes for documentation / lintability and call `.validate()` inside `try_from` ([10-data-model.md § 2.3](./10-data-model.md#23-schema-layer) explicitly endorses this layered pattern). Decision can wait until Phase 3 picks a crate-set.~~ — **resolved 2026-05-04** via option (a).
 
 ### Spec inconsistencies surfaced
 
 - **P3** — [21-api-compat-matrix.md § 1](./21-api-compat-matrix.md#1-http-api-endpoints) lists `PUT / PATCH / DELETE | /pmem/{id}` and `PUT / GET / PATCH | /hotplug/memory` but [20-firecracker-api.md § 2](./20-firecracker-api.md#2-server-shape) router skeleton omits the `PATCH`/`DELETE` for pmem and the `PUT`/`GET` for hotplug-memory. Phase 2.5 review caught this and the implementation now wires all five — but the spec sample router needs the same correction in its next revision.
 
-- **P3** — `BalloonHintingOp` (start | status | stop) is not pinned in any spec. Phase 2 added the enum at `crates/api/src/schemas/balloon.rs:BalloonHintingOp`; the [21 § 1](./21-api-compat-matrix.md#1-http-api-endpoints) row should call out the three-value vocabulary explicitly so future contributors don't drift on it.
+- ~~**P3** — `BalloonHintingOp` (start | status | stop) is not pinned in any spec. Phase 2 added the enum at `crates/api/src/schemas/balloon.rs:BalloonHintingOp`; the [21 § 1](./21-api-compat-matrix.md#1-http-api-endpoints) row should call out the three-value vocabulary explicitly so future contributors don't drift on it.~~ — **resolved 2026-05-04**.
 
 ## Phase 3 (lands at end of Phase 3 review pass)
 
@@ -81,7 +145,7 @@ Entries are append-only. When a deferred item is fixed, **strike it through** ra
 
 ### virtio-mem invariant ambiguity (spec defect)
 
-- **P2** — I-DEV-4 in [14 § 6](./14-virtio-and-devices.md#6-invariants) reads "virtio-mem hotplug `plug`/`unplug` of an N-block range performs exactly N `Vm::map_memory`/`Vm::unmap_memory` calls." Squib's implementation coalesces the N contiguous blocks into one `MemHotplugBackend::plug(base, N * BLOCK_SIZE)` call (cheaper TLB shootdown). The test at `crates/virtio/src/devices/mem.rs:test_should_plug_n_blocks_in_a_single_backend_call` documents the ambiguity inline. Fix shape: amend I-DEV-4 to "exactly N or one coalesced map of N × BLOCK_SIZE", or split the merged call back into N per-block calls. The merged shape is preferable on Apple Silicon (one stage-2 TLB invalidate vs N).
+- ~~**P2** — I-DEV-4 in [14 § 6](./14-virtio-and-devices.md#6-invariants) reads "virtio-mem hotplug `plug`/`unplug` of an N-block range performs exactly N `Vm::map_memory`/`Vm::unmap_memory` calls." Squib's implementation coalesces the N contiguous blocks into one `MemHotplugBackend::plug(base, N * BLOCK_SIZE)` call (cheaper TLB shootdown). The test at `crates/virtio/src/devices/mem.rs:test_should_plug_n_blocks_in_a_single_backend_call` documents the ambiguity inline. Fix shape: amend I-DEV-4 to "exactly N or one coalesced map of N × BLOCK_SIZE", or split the merged call back into N per-block calls. The merged shape is preferable on Apple Silicon (one stage-2 TLB invalidate vs N).~~ — **resolved 2026-05-04**.
 
 ### Spec inconsistency: VendorID
 
@@ -89,19 +153,19 @@ Entries are append-only. When a deferred item is fixed, **strike it through** ra
 
 ### `set_status` lacks a transition-rejected-into-DEVICE_NEEDS_RESET test
 
-- **P2** — `crates/virtio/src/transport.rs::set_status` correctly drops invalid driver-init transitions and sets `DEVICE_NEEDS_RESET` on activation failure (line 286), but no unit test asserts that a post-`DRIVER_OK` feature ack returns `(ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK | DEVICE_NEEDS_RESET)` per virtio v1.2 § 2.1. Fix shape: add a unit test in `transport.rs::tests` that drives the device past `DRIVER_OK`, attempts a feature ack, then reads the `Status` register and asserts the `DEVICE_NEEDS_RESET` bit.
+- ~~**P2** — `crates/virtio/src/transport.rs::set_status` correctly drops invalid driver-init transitions and sets `DEVICE_NEEDS_RESET` on activation failure (line 286), but no unit test asserts that a post-`DRIVER_OK` feature ack returns `(ACKNOWLEDGE | DRIVER | FEATURES_OK | DRIVER_OK | DEVICE_NEEDS_RESET)` per virtio v1.2 § 2.1. Fix shape: add a unit test in `transport.rs::tests` that drives the device past `DRIVER_OK`, attempts a feature ack, then reads the `Status` register and asserts the `DEVICE_NEEDS_RESET` bit.~~ — **resolved 2026-05-04** via `test_should_or_device_needs_reset_when_activation_fails`.
 
 ### Bus uses `RwLock` on the dispatch hot path
 
-- **P2** — `crates/bus/src/lib.rs::Bus` wraps the `BTreeMap` in `RwLock`, but every `read()`/`write()` call takes the read-lock — ~5–10 ns per MMIO exit, compounding across millions per second. Spec § 2 example shows a bare `BTreeMap`. Fix shape: build the bus immutably via a `BusBuilder` that returns `Arc<Bus>` post-boot, or move the `RwLock` outside `Bus` so callers who mutate during boot pay the cost and the dispatch path uses `&BTreeMap` directly.
+- ~~**P2** — `crates/bus/src/lib.rs::Bus` wraps the `BTreeMap` in `RwLock`, but every `read()`/`write()` call takes the read-lock — ~5–10 ns per MMIO exit, compounding across millions per second. Spec § 2 example shows a bare `BTreeMap`. Fix shape: build the bus immutably via a `BusBuilder` that returns `Arc<Bus>` post-boot, or move the `RwLock` outside `Bus` so callers who mutate during boot pay the cost and the dispatch path uses `&BTreeMap` directly.~~ — **resolved 2026-05-04** (BusBuilder split-phase shape).
 
 ### MMDS — base64url helper duplicates a maintained crate
 
-- **P3** — `crates/mmds/src/token.rs::base64url_no_pad` is hand-rolled (~30 LOC). Workspace already plans `aws-lc-rs` for snapshot crypto; pulling `base64 = "0.22"` (or `data-encoding`) is one line and removes hand-coded SIMD-unfriendly bit-shifting that has no fuzz coverage. Fix shape: add `base64` to `[workspace.dependencies]` once any other crate adopts it; replace `base64url_no_pad` with `URL_SAFE_NO_PAD.encode(...)`.
+- ~~**P3** — `crates/mmds/src/token.rs::base64url_no_pad` is hand-rolled (~30 LOC). Workspace already plans `aws-lc-rs` for snapshot crypto; pulling `base64 = "0.22"` (or `data-encoding`) is one line and removes hand-coded SIMD-unfriendly bit-shifting that has no fuzz coverage. Fix shape: add `base64` to `[workspace.dependencies]` once any other crate adopts it; replace `base64url_no_pad` with `URL_SAFE_NO_PAD.encode(...)`.~~ — **resolved 2026-05-04**.
 
 ### MMDS interceptor — set_ipv4 needs API-layer wiring
 
-- **P2** — `MmdsInterceptor::set_ipv4` (and the consume-and-return `with_ipv4`) ship in `crates/mmds/src/interceptor.rs`, but the API layer's `PUT /mmds/config { ipv4_address }` handler does not call them yet — the MMDS controller in `crates/api/src/controller.rs` will need to thread the override into the active interceptor when virtio-net comes up. Fix shape: in the device-manager wiring (Phase 4 or later), surface the interceptor handle on the `RuntimeApiController` and call `set_ipv4` from the `MmdsConfig::ipv4_address` field on apply.
+- ~~**P2** — `MmdsInterceptor::set_ipv4` (and the consume-and-return `with_ipv4`) ship in `crates/mmds/src/interceptor.rs`, but the API layer's `PUT /mmds/config { ipv4_address }` handler does not call them yet — the MMDS controller in `crates/api/src/controller.rs` will need to thread the override into the active interceptor when virtio-net comes up. Fix shape: in the device-manager wiring (Phase 4 or later), surface the interceptor handle on the `RuntimeApiController` and call `set_ipv4` from the `MmdsConfig::ipv4_address` field on apply.~~ — **resolved 2026-05-04** (already wired by Phase 3).
 
 ## Phase 4 (lands at end of Phase 4 review pass)
 
@@ -124,7 +188,7 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 ### `host_dev_name` round-trip needs a snapshot golden test
 
-- **P2** — I-NET-3 in [30-networking.md § 7](./30-networking.md#7-invariants): "`host_dev_name` is round-trip-preserved through snapshot save/restore even though it is opaque." The string is preserved through `crates/api/src/schemas/network.rs::NetworkInterfaceConfig` and threaded into `crates/vmm/src/device_manager.rs::NetSpec::host_dev_name`, but no snapshot-side test asserts it round-trips through a `Snapshot::save_state`/`restore_state` cycle (snapshot subsystem lands in Phase 5). Fix shape: add the golden test as part of Phase 5.2's vCPU/GIC save-restore work — the network-interface description sits in the same state-blob.
+- ~~**P2** — I-NET-3 in [30-networking.md § 7](./30-networking.md#7-invariants): "`host_dev_name` is round-trip-preserved through snapshot save/restore even though it is opaque." The string is preserved through `crates/api/src/schemas/network.rs::NetworkInterfaceConfig` and threaded into `crates/vmm/src/device_manager.rs::NetSpec::host_dev_name`, but no snapshot-side test asserts it round-trips through a `Snapshot::save_state`/`restore_state` cycle (snapshot subsystem lands in Phase 5). Fix shape: add the golden test as part of Phase 5.2's vCPU/GIC save-restore work — the network-interface description sits in the same state-blob.~~ — **resolved 2026-05-04**.
 
 ### gvproxy bundling — binary not yet vendored
 
@@ -132,15 +196,15 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 ### Bridged `bridged_iface_name` not exposed in CLI
 
-- **P3** — `crates/net/src/iface.rs::InterfaceParams::bridged_iface_name` accepts the host-side physical interface name (`en0`, etc.) for `VMNET_BRIDGED_MODE`. The CLI does not expose this knob — `--network=bridged` defaults `bridged_iface_name = None`, which lets vmnet pick the primary interface. Fix shape: add `--bridged-iface <name>` when bridged mode is exercised in production; for the inner-dev-loop use case the default is fine.
+- ~~**P3** — `crates/net/src/iface.rs::InterfaceParams::bridged_iface_name` accepts the host-side physical interface name (`en0`, etc.) for `VMNET_BRIDGED_MODE`. The CLI does not expose this knob — `--network=bridged` defaults `bridged_iface_name = None`, which lets vmnet pick the primary interface. Fix shape: add `--bridged-iface <name>` when bridged mode is exercised in production; for the inner-dev-loop use case the default is fine.~~ — **resolved 2026-05-04**.
 
 ### vmnet `start_interface` callback budget is a single global
 
-- **P3** — `crates/net/src/sys/block.rs` uses a single static `ACTIVE_CONTEXT: Mutex<Option<usize>>` so only one `vmnet_start_interface` can be in flight at a time. squib instantiates one virtio-net per VM so this is fine for now, but if a future feature spawns N interfaces in parallel the guard `debug_assert!` will trip. Fix shape: keyed registry (`SlotMap` or per-block-instance heap allocation with `BLOCK_HAS_COPY_DISPOSE` flags); only worth doing if multi-NIC microVMs land.
+- ~~**P3** — `crates/net/src/sys/block.rs` uses a single static `ACTIVE_CONTEXT: Mutex<Option<usize>>` so only one `vmnet_start_interface` can be in flight at a time. squib instantiates one virtio-net per VM so this is fine for now, but if a future feature spawns N interfaces in parallel the guard `debug_assert!` will trip. Fix shape: keyed registry (`SlotMap` or per-block-instance heap allocation with `BLOCK_HAS_COPY_DISPOSE` flags); only worth doing if multi-NIC microVMs land.~~ — **resolved 2026-05-04** by the `block2` adoption (per-call `Arc<StartContext>` captured by `RcBlock`; no global state).
 
 ### `host_dev_name` not yet a newtype in the device manager
 
-- **P3** — `crates/vmm/src/device_manager.rs::NetSpec::host_dev_name` is a plain `String`. The API layer's `crates/api/src/schemas/network.rs::validate_host_dev_name` already enforces the byte cap and NUL-rejection per [70-security.md § 4](./70-security.md#4-input-validation), so the upstream value is validated, but the type system in the device manager doesn't witness that — a future direct construction could bypass the validation. Fix shape: introduce a `HostDevName(String)` newtype in `squib-core` with the same fallible constructor as `IfaceId`, then thread it through `NetSpec` and `NetworkInterfaceConfig`. Out of phase because it's a multi-crate refactor that doesn't change runtime behaviour today.
+- ~~**P3** — `crates/vmm/src/device_manager.rs::NetSpec::host_dev_name` is a plain `String`. The API layer's `crates/api/src/schemas/network.rs::validate_host_dev_name` already enforces the byte cap and NUL-rejection per [70-security.md § 4](./70-security.md#4-input-validation), so the upstream value is validated, but the type system in the device manager doesn't witness that — a future direct construction could bypass the validation. Fix shape: introduce a `HostDevName(String)` newtype in `squib-core` with the same fallible constructor as `IfaceId`, then thread it through `NetSpec` and `NetworkInterfaceConfig`. Out of phase because it's a multi-crate refactor that doesn't change runtime behaviour today.~~ — **resolved 2026-05-04**.
 
 ### `iface_uuid_for` rolls a non-standard hash
 
@@ -155,23 +219,23 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 ### Wire-stability of positional sysreg encoding
 
-- **P2** — `crates/arch/src/sysregs.rs:132-137` (`SysReg::as_encoded`) uses `position()+1` in `SysReg::all()`. The doc says "never insert in the middle", but a wire format that silently reinterprets old keys when someone reorders the slice is a bug magnet — the compiler has no way to enforce the invariant. Fix shape: hand-assigned `u64` constants per variant, or a `const`-checked lookup table keyed on `Self as u8`. Do this before the snapshot format ships in a 1.0 tag.
+- ~~**P2** — `crates/arch/src/sysregs.rs:132-137` (`SysReg::as_encoded`) uses `position()+1` in `SysReg::all()`. The doc says "never insert in the middle", but a wire format that silently reinterprets old keys when someone reorders the slice is a bug magnet — the compiler has no way to enforce the invariant. Fix shape: hand-assigned `u64` constants per variant, or a `const`-checked lookup table keyed on `Self as u8`. Do this before the snapshot format ships in a 1.0 tag.~~ — **resolved 2026-05-04**.
 
 ### Diff snapshot property test (I-SNAP-2)
 
-- **P2** — `specs/16-snapshots.md:188` (I-SNAP-2) asks for "Property test with synthetic write patterns". `crates/snapshot/tests/integration.rs::diff_round_trip_writes_only_dirty_pages` exercises one specific dirty pattern; no `proptest!` validates "the resulting `<id>.mem` carries the pattern bytes only at those offsets and zeros elsewhere" across randomized write distributions. Fix shape: add a proptest in the integration test that generates a random subset of pages, calls `mark_dirty` for each, and asserts byte-equality against the expected sparse pattern.
+- ~~**P2** — `specs/16-snapshots.md:188` (I-SNAP-2) asks for "Property test with synthetic write patterns". `crates/snapshot/tests/integration.rs::diff_round_trip_writes_only_dirty_pages` exercises one specific dirty pattern; no `proptest!` validates "the resulting `<id>.mem` carries the pattern bytes only at those offsets and zeros elsewhere" across randomized write distributions. Fix shape: add a proptest in the integration test that generates a random subset of pages, calls `mark_dirty` for each, and asserts byte-equality against the expected sparse pattern.~~ — **resolved 2026-05-04** via deterministic-LCG sweep.
 
 ### Cross-FS rejection has no live coverage
 
-- **P3** — `crates/snapshot/tests/integration.rs::cross_filesystem_temp_path_rejection` documents that the live cross-FS test runs out-of-band; CI does not currently exercise it. Fix shape: add a macOS-only test that creates a tmpfs ramdisk via `hdiutil attach -nomount ram://...`, mounts it under a known directory, and asserts `AtomicCommitCrossFs` when the snapshot dest sits there but the temp path doesn't.
+- ~~**P3** — `crates/snapshot/tests/integration.rs::cross_filesystem_temp_path_rejection` documents that the live cross-FS test runs out-of-band; CI does not currently exercise it. Fix shape: add a macOS-only test that creates a tmpfs ramdisk via `hdiutil attach -nomount ram://...`, mounts it under a known directory, and asserts `AtomicCommitCrossFs` when the snapshot dest sits there but the temp path doesn't.~~ — **resolved 2026-05-04** via `make snapshot-cross-fs-test`.
 
 ### `infer_memory_path` only handles `.snap`
 
-- **P3** — `crates/snapshot/src/load.rs:212-219` returns `None` for files named `vm.snapshot` or anything other than `*.snap`. Operators with non-default extensions get no hint about the matching memory file. Documented; matches Firecracker. Fix shape: accept any stem, swap the extension to `.mem`; raise the cap if it produces ambiguous matches in practice.
+- ~~**P3** — `crates/snapshot/src/load.rs:212-219` returns `None` for files named `vm.snapshot` or anything other than `*.snap`. Operators with non-default extensions get no hint about the matching memory file. Documented; matches Firecracker. Fix shape: accept any stem, swap the extension to `.mem`; raise the cap if it produces ambiguous matches in practice.~~ — **resolved 2026-05-04**.
 
 ### Style: explicit truncating casts in production code
 
-- **P3** — Several `as u64` / `as usize` casts in `crates/snapshot/src/state.rs:117`, `crates/host/src/pager.rs:181, 183, 636, 731` are silenced crate-wide via `#![allow(clippy::cast_possible_truncation)]`. CLAUDE.md prefers `u64::try_from(usize)` (infallible on 64-bit) for readability. Fix shape: switch to `try_from`; remove the crate-level allow once the call sites are clean.
+- ~~**P3** — Several `as u64` / `as usize` casts in `crates/snapshot/src/state.rs:117`, `crates/host/src/pager.rs:181, 183, 636, 731` are silenced crate-wide via `#![allow(clippy::cast_possible_truncation)]`. CLAUDE.md prefers `u64::try_from(usize)` (infallible on 64-bit) for readability. Fix shape: switch to `try_from`; remove the crate-level allow once the call sites are clean.~~ — **resolved 2026-05-04** for the cited production sites; remaining casts are widening or test-only and the crate-wide allow stays for those.
 
 ### vCPU + GIC HVF impl deferred
 
@@ -189,43 +253,43 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 ### Boundary input validation deferred to Phase 7 polish
 
-- **P2** — `apps/squib-jail/src/cli.rs:23-99` carries no explicit per-flag length cap. Per `specs/70-security.md` § 4 every external string from launchers crossing the trust boundary should be byte-bounded. clap's defaults are unbounded; a `--cgroup` value of 1 GiB would be accepted before reaching the parser. Fix shape: thread a `value_parser` chain (`clap::builder::StringValueParser::new().try_map(|s| { … })`) over `--id` / `--exec-file` / `--chroot-base-dir` / `--cgroup` / `--resource-limit` / `--parent-cgroup` / `--netns` / passthrough argv with explicit byte caps (≤256B for short fields, ≤1024B for paths).
+- ~~**P2** — `apps/squib-jail/src/cli.rs:23-99` carries no explicit per-flag length cap. Per `specs/70-security.md` § 4 every external string from launchers crossing the trust boundary should be byte-bounded. clap's defaults are unbounded; a `--cgroup` value of 1 GiB would be accepted before reaching the parser. Fix shape: thread a `value_parser` chain (`clap::builder::StringValueParser::new().try_map(|s| { … })`) over `--id` / `--exec-file` / `--chroot-base-dir` / `--cgroup` / `--resource-limit` / `--parent-cgroup` / `--netns` / passthrough argv with explicit byte caps (≤256B for short fields, ≤1024B for paths).~~ — **resolved 2026-05-04**.
 
 ### TOCTOU on `--exec-file` canonicalize
 
-- **P2** — `apps/squib-jail/src/env.rs::canonicalize_exec_file` calls `fs::canonicalize` then `fs::metadata` (two stat calls). A racing rename between the two opens a TOCTOU window where the binary at the canonical path is not the binary that was checked. Per `specs/70-security.md` § 5 ("re-canonicalize after open") the right shape is `O_NOFOLLOW + fstat` against an open fd. Fix shape: open with `OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW)`, `fstat` the fd, copy via the fd into the chroot.
+- ~~**P2** — `apps/squib-jail/src/env.rs::canonicalize_exec_file` calls `fs::canonicalize` then `fs::metadata` (two stat calls). A racing rename between the two opens a TOCTOU window where the binary at the canonical path is not the binary that was checked. Per `specs/70-security.md` § 5 ("re-canonicalize after open") the right shape is `O_NOFOLLOW + fstat` against an open fd. Fix shape: open with `OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW)`, `fstat` the fd, copy via the fd into the chroot.~~ — **resolved 2026-05-04** via `copy_via_nofollow`.
 
 ### Daemonize without an initial fork
 
-- **P2** — `apps/squib-jail/src/sequence.rs::daemonize` calls `setsid()` directly. On a process that's already a process group leader (most launcher invocations), `setsid` returns EPERM and the daemonize step fails. The standard double-fork pattern is `fork() → child setsid → fork() → grandchild execs`. Fix shape: implement the fork prologue in `sequence::daemonize` and update `specs/40-jailer.md` § 3 step 5 to spell the contract out.
+- ~~**P2** — `apps/squib-jail/src/sequence.rs::daemonize` calls `setsid()` directly. On a process that's already a process group leader (most launcher invocations), `setsid` returns EPERM and the daemonize step fails. The standard double-fork pattern is `fork() → child setsid → fork() → grandchild execs`. Fix shape: implement the fork prologue in `sequence::daemonize` and update `specs/40-jailer.md` § 3 step 5 to spell the contract out.~~ — **resolved 2026-05-04**.
 
 ### Chroot tree mode bits
 
-- **P2** — `apps/squib-jail/src/env.rs::stage` runs `fs::create_dir_all` inheriting the caller's umask (typically `022`, sometimes `002` when the process is started under a service manager). The chroot dir then has whatever mode the parent's umask permits. Fix shape: `fs::set_permissions(&self.chroot_dir, fs::Permissions::from_mode(0o755))` after `create_dir_all` completes.
+- ~~**P2** — `apps/squib-jail/src/env.rs::stage` runs `fs::create_dir_all` inheriting the caller's umask (typically `022`, sometimes `002` when the process is started under a service manager). The chroot dir then has whatever mode the parent's umask permits. Fix shape: `fs::set_permissions(&self.chroot_dir, fs::Permissions::from_mode(0o755))` after `create_dir_all` completes.~~ — **resolved 2026-05-04**.
 
 ### `execv` does not sanitise environment
 
-- **P3** — `apps/squib-jail/src/sequence.rs::exec` uses `libc::execv`, inheriting the caller's full environment into the staged binary. Upstream jailer calls `execve` with a curated `envp` (PATH-only, plus a small allowlist). For squib's threat model (developer machine, trusted operator) this is low priority but worth tracking. Fix shape: add a `sanitize_env()` step that filters envp to a constant allowlist, or accept the inherited env explicitly via a doc note.
+- ~~**P3** — `apps/squib-jail/src/sequence.rs::exec` uses `libc::execv`, inheriting the caller's full environment into the staged binary. Upstream jailer calls `execve` with a curated `envp` (PATH-only, plus a small allowlist). For squib's threat model (developer machine, trusted operator) this is low priority but worth tracking. Fix shape: add a `sanitize_env()` step that filters envp to a constant allowlist, or accept the inherited env explicitly via a doc note.~~ — **resolved 2026-05-04**.
 
 ### Homebrew formula needs `--locked`
 
-- **P3** — `dist/homebrew/squib.rb:32` runs `cargo build --release --bin squib --bin squib-jail` without `--locked`. Per `specs/70-security.md` § 10 (Supply chain), pinning to `Cargo.lock` is the only thing that prevents a yanked transitive from sneaking in between brew install and recipe-mtime. Fix shape: add `--locked` once a release-targeted `Cargo.lock` lands (currently the workspace's `Cargo.lock` is dev-mode).
+- ~~**P3** — `dist/homebrew/squib.rb:32` runs `cargo build --release --bin squib --bin squib-jail` without `--locked`. Per `specs/70-security.md` § 10 (Supply chain), pinning to `Cargo.lock` is the only thing that prevents a yanked transitive from sneaking in between brew install and recipe-mtime. Fix shape: add `--locked` once a release-targeted `Cargo.lock` lands (currently the workspace's `Cargo.lock` is dev-mode).~~ — **resolved 2026-05-04**.
 
 ### `.pkg` builder shells out to `python3`
 
-- **P3** — `dist/pkg/build-pkg.sh:30-34` uses `python3 -c '…json.load(sys.stdin)…'` to extract the workspace version from `cargo metadata`. Some ephemeral CI runners ship without `python3` in PATH (they need to install it deliberately). The Makefile `hvf-test` target already requires `jq`; consolidating on jq drops the python dep. Fix shape: replace with `jq -r '.packages[0].version'`.
+- ~~**P3** — `dist/pkg/build-pkg.sh:30-34` uses `python3 -c '…json.load(sys.stdin)…'` to extract the workspace version from `cargo metadata`. Some ephemeral CI runners ship without `python3` in PATH (they need to install it deliberately). The Makefile `hvf-test` target already requires `jq`; consolidating on jq drops the python dep. Fix shape: replace with `jq -r '.packages[0].version'`.~~ — **resolved 2026-05-04** (also swapped the `Makefile` PKG_OUT and TARGET_DIR helpers).
 
 ### Jailer can be built on Linux to no purpose
 
-- **P3** — `apps/squib-jail/src/sandbox.rs:75-80` ships a non-macOS stub returning an error so the crate compiles on Linux, but the resulting binary is useless (Darwin syscalls won't link / run). Fix shape: gate the `[[bin]]` target in `apps/squib-jail/Cargo.toml` to `target.'cfg(target_os = "macos")'.dependencies` (or a `required-features` analog) so a Linux build skips the binary outright.
+- ~~**P3** — `apps/squib-jail/src/sandbox.rs:75-80` ships a non-macOS stub returning an error so the crate compiles on Linux, but the resulting binary is useless (Darwin syscalls won't link / run). Fix shape: gate the `[[bin]]` target in `apps/squib-jail/Cargo.toml` to `target.'cfg(target_os = "macos")'.dependencies` (or a `required-features` analog) so a Linux build skips the binary outright.~~ — **resolved 2026-05-04** via `required-features = ["macos"]`.
 
 ### Default sandbox profile over-grants
 
-- **P3** — `apps/squib-jail/profiles/default.sb:42-43` allows `mach-lookup` of `com.apple.SystemConfiguration.configd` and `(allow sysctl-read)` is unrestricted. squib's actual sysctl reads are only the HVF-feature `hw.optional.arm.FEAT_*` set, and `configd` is needed only when squib-net opens a vmnet handle (which by then has its own entitlement). Fix shape: scope `sysctl-read` to a name allowlist; drop `configd` once an integration trace confirms it's unused.
+- ~~**P3** — `apps/squib-jail/profiles/default.sb:42-43` allows `mach-lookup` of `com.apple.SystemConfiguration.configd` and `(allow sysctl-read)` is unrestricted. squib's actual sysctl reads are only the HVF-feature `hw.optional.arm.FEAT_*` set, and `configd` is needed only when squib-net opens a vmnet handle (which by then has its own entitlement). Fix shape: scope `sysctl-read` to a name allowlist; drop `configd` once an integration trace confirms it's unused.~~ — **resolved 2026-05-04**.
 
 ### `tracing-subscriber` feature bloat
 
-- **P3** — `apps/squib-jail/Cargo.toml:20` inherits the workspace's full feature set on `tracing-subscriber` (env-filter, fmt, json, …). The jailer is a sub-100ms one-shot binary that emits at most a handful of warnings; pulling JSON / ANSI / chrono dramatically inflates the binary. Fix shape: depend with `default-features = false, features = ["env-filter", "fmt"]` once a per-crate dependency override lands in workspace Cargo.toml.
+- ~~**P3** — `apps/squib-jail/Cargo.toml:20` inherits the workspace's full feature set on `tracing-subscriber` (env-filter, fmt, json, …). The jailer is a sub-100ms one-shot binary that emits at most a handful of warnings; pulling JSON / ANSI / chrono dramatically inflates the binary. Fix shape: depend with `default-features = false, features = ["env-filter", "fmt"]` once a per-crate dependency override lands in workspace Cargo.toml.~~ — **resolved 2026-05-04**.
 
 ### Pre-existing: hvf_smoke test runs in plain `cargo test --workspace`
 
@@ -258,9 +322,9 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 ### Deferred from Phase 7 review
 
-- **P2** — `crates/snapshot/Cargo.toml:34` and `crates/vmm/Cargo.toml:39` register `criterion` as an unconditional `dev-dependency`. Bench targets are gated on `required-features = ["bench"]`, so plain `cargo test -p squib-snapshot` pulls criterion + ~30 transitive crates it never uses. Fix shape: gate `criterion` behind an optional dependency flipped on by the `bench` feature (`criterion = { workspace = true, optional = true }` + `bench = ["dep:criterion"]`).
+- ~~**P2** — `crates/snapshot/Cargo.toml:34` and `crates/vmm/Cargo.toml:39` register `criterion` as an unconditional `dev-dependency`. Bench targets are gated on `required-features = ["bench"]`, so plain `cargo test -p squib-snapshot` pulls criterion + ~30 transitive crates it never uses. Fix shape: gate `criterion` behind an optional dependency flipped on by the `bench` feature (`criterion = { workspace = true, optional = true }` + `bench = ["dep:criterion"]`).~~ — **resolved 2026-05-04**.
 
-- **P2** — `tests/firecracker-compat/tests/f_rows.rs` covers most rows in `21-api-compat-matrix.md § 1` but is missing a row-by-row stub-VMM F-test for `GET /balloon/statistics`, `PATCH /balloon/statistics`, `PUT /snapshot/create` (expected 400 with the documented stub `fault_message`), `PUT /snapshot/load` (same), `PATCH /vm` (post-boot Pause/Resume), and `PUT /actions {InstanceStart}` (expected 400 with stub `fault_message`). Fix shape: add one mechanical happy-path test per row, marking the inherently-stubbed actions as expected-400 so they convert cleanly when Phase 1's vCPU tail lands.
+- ~~**P2** — `tests/firecracker-compat/tests/f_rows.rs` covers most rows in `21-api-compat-matrix.md § 1` but is missing a row-by-row stub-VMM F-test for `GET /balloon/statistics`, `PATCH /balloon/statistics`, `PUT /snapshot/create` (expected 400 with the documented stub `fault_message`), `PUT /snapshot/load` (same), `PATCH /vm` (post-boot Pause/Resume), and `PUT /actions {InstanceStart}` (expected 400 with stub `fault_message`). Fix shape: add one mechanical happy-path test per row, marking the inherently-stubbed actions as expected-400 so they convert cleanly when Phase 1's vCPU tail lands.~~ — **resolved 2026-05-04**.
 
 ## Cross-references
 

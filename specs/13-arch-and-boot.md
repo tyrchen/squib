@@ -102,7 +102,7 @@ The choice not to mirror the full KVM list is deliberate; many KVM-saved registe
 
 ```rust
 pub enum EsrDecoded {
-    DataAbort { is_write: bool, sas: u8, srt: u8, sf: bool, far: u64 },
+    DataAbort { is_write: bool, sas: u8, srt: u8, sf: bool },
     Hvc { imm16: u16 },
     Smc { imm16: u16 },
     SystemRegister { read: bool, op0: u8, op1: u8, crn: u8, crm: u8, op2: u8, xt: u8 },
@@ -113,7 +113,7 @@ pub enum EsrDecoded {
 }
 ```
 
-Property-tested against random `u64` inputs; never panics. Sourced from the Arm ARM, sections D17.2 and D24.
+Property-tested against random `u64` inputs; never panics. Sourced from the Arm ARM, sections D17.2 and D24. `FAR_EL2` is *not* part of `EsrDecoded` — `decode(esr)` cannot derive it; the run-loop reads `FAR_EL2` separately and threads it onto the data-abort `Exit::Mmio { addr, … }` envelope downstream.
 
 ## 5. PSCI dispatch
 

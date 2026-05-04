@@ -8,8 +8,53 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, ValueEnum, builder::TypedValueParser};
 use tracing::warn;
+
+/// Byte cap for short, identity-shaped flags. The chroot id, sandbox profile name,
+/// cgroup version, and resource-limit values all fit comfortably under 256 B; a
+/// value larger than that is by definition not a real id, just a denial-of-service
+/// against any downstream parser ([70-security.md §
+/// 4](../../specs/70-security.md#4-input-validation)).
+const SHORT_FLAG_MAX_BYTES: usize = 256;
+/// Byte cap for path-shaped flags. macOS `PATH_MAX` is 1024 B; we accept up to that
+/// for `--exec-file`, `--chroot-base-dir`, `--netns`, etc. so a real-world deep
+/// chroot tree still passes while a megabyte-of-junk argv bombs out at parse time.
+const PATH_FLAG_MAX_BYTES: usize = 1024;
+/// Byte cap for child argv (after `--`). Squib's own CLI accepts no flag near
+/// this limit (the longest is `--config-file` followed by a path), so 4 KiB
+/// per element is a comfortable ceiling that still defeats argv-pumping `DoS`.
+const CHILD_ARG_MAX_BYTES: usize = 4096;
+/// Byte cap on the *sum* of child argv element lengths — bounds total argv area
+/// so an operator cannot trickle 1024 elements of 4 KiB each through.
+const CHILD_ARG_TOTAL_MAX_BYTES: usize = 16 * 1024;
+
+fn capped_string_parser(max_bytes: usize) -> impl TypedValueParser<Value = String> {
+    clap::builder::StringValueParser::new().try_map(move |s: String| -> Result<String, String> {
+        if s.len() > max_bytes {
+            return Err(format!("value is {} bytes; max {max_bytes}", s.len()));
+        }
+        if s.as_bytes().contains(&0) {
+            return Err("value contains an interior NUL byte".to_string());
+        }
+        Ok(s)
+    })
+}
+
+fn capped_path_parser() -> impl TypedValueParser<Value = PathBuf> {
+    clap::builder::StringValueParser::new().try_map(|s: String| -> Result<PathBuf, String> {
+        if s.len() > PATH_FLAG_MAX_BYTES {
+            return Err(format!(
+                "path is {} bytes; max {PATH_FLAG_MAX_BYTES}",
+                s.len()
+            ));
+        }
+        if s.as_bytes().contains(&0) {
+            return Err("path contains an interior NUL byte".to_string());
+        }
+        Ok(PathBuf::from(s))
+    })
+}
 
 /// Squib-jail CLI surface — kept in lockstep with upstream `jailer` so launchers
 /// can swap one binary for the other.
@@ -22,11 +67,11 @@ use tracing::warn;
 )]
 pub(crate) struct Args {
     /// Instance identifier; used in chroot path naming.
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", value_parser = capped_string_parser(SHORT_FLAG_MAX_BYTES))]
     pub(crate) id: String,
 
     /// Path to the binary to exec into (the squib binary, by convention).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", value_parser = capped_path_parser())]
     pub(crate) exec_file: PathBuf,
 
     /// Numeric uid the jailer setuids to before exec.
@@ -43,7 +88,8 @@ pub(crate) struct Args {
         long,
         value_name = "PATH",
         default_value = "/srv/jailer",
-        env = "SQUIB_JAIL_BASE"
+        env = "SQUIB_JAIL_BASE",
+        value_parser = capped_path_parser(),
     )]
     pub(crate) chroot_base_dir: PathBuf,
 
@@ -62,23 +108,23 @@ pub(crate) struct Args {
     /// `<resource>=<value>` pairs for `setrlimit(2)`. Repeatable. Allowed
     /// keys: `fsize`, `no-file` (matching upstream — see `specs/40-jailer.md`
     /// § 2.1).
-    #[arg(long = "resource-limit", value_name = "K=V")]
+    #[arg(long = "resource-limit", value_name = "K=V", value_parser = capped_string_parser(SHORT_FLAG_MAX_BYTES))]
     pub(crate) resource_limits: Vec<String>,
 
     /// Linux cgroup file=value pair. Accepted-and-warned on Darwin.
-    #[arg(long = "cgroup", value_name = "K=V")]
+    #[arg(long = "cgroup", value_name = "K=V", value_parser = capped_string_parser(SHORT_FLAG_MAX_BYTES))]
     pub(crate) cgroups: Vec<String>,
 
     /// Linux parent cgroup. Accepted-and-warned on Darwin.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", value_parser = capped_string_parser(PATH_FLAG_MAX_BYTES))]
     pub(crate) parent_cgroup: Option<String>,
 
     /// Linux cgroup version (1 or 2). Accepted-and-warned on Darwin.
-    #[arg(long, value_name = "VERSION", default_value = "1")]
+    #[arg(long, value_name = "VERSION", default_value = "1", value_parser = capped_string_parser(SHORT_FLAG_MAX_BYTES))]
     pub(crate) cgroup_version: String,
 
     /// Linux netns path. Accepted-and-warned on Darwin.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", value_parser = capped_path_parser())]
     pub(crate) netns: Option<PathBuf>,
 
     /// Apply a bundled `sandbox_init(3)` profile by name. Squib extension
@@ -92,7 +138,7 @@ pub(crate) struct Args {
 
     /// Arguments to pass through to the staged binary, separated from the
     /// jailer's own argv by `--`.
-    #[arg(last = true)]
+    #[arg(last = true, value_parser = capped_string_parser(CHILD_ARG_MAX_BYTES))]
     pub(crate) passthrough_argv: Vec<String>,
 }
 
@@ -139,6 +185,20 @@ impl LogLevel {
 }
 
 impl Args {
+    /// Defence-in-depth check on the *sum* of child argv element lengths.
+    /// clap's per-element `value_parser` already caps each value, but a
+    /// thousand-element argv summing to a megabyte still passes that. Bound the
+    /// total here so the wire shape is provably small.
+    pub(crate) fn validate_passthrough_argv_total(&self) -> Result<(), String> {
+        let total: usize = self.passthrough_argv.iter().map(String::len).sum();
+        if total > CHILD_ARG_TOTAL_MAX_BYTES {
+            return Err(format!(
+                "passthrough argv totals {total} bytes; max {CHILD_ARG_TOTAL_MAX_BYTES}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Emit one-time warnings for the Linux-only flags so an operator
     /// running squib-jail with a Linux-shaped invocation sees that the
     /// Darwin shim cannot fulfil those semantics. See
@@ -245,6 +305,64 @@ mod tests {
     #[test]
     fn cli_command_definition_is_well_formed() {
         Args::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_rejects_overlong_id() {
+        let huge = "a".repeat(SHORT_FLAG_MAX_BYTES + 1);
+        let err = Args::try_parse_from([
+            "squib-jail",
+            "--id",
+            &huge,
+            "--exec-file",
+            "/usr/local/bin/squib",
+            "--uid",
+            "0",
+            "--gid",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("max"));
+    }
+
+    #[test]
+    fn cli_rejects_nul_in_path() {
+        let err = Args::try_parse_from([
+            "squib-jail",
+            "--id",
+            "vm1",
+            "--exec-file",
+            "/bad\0path",
+            "--uid",
+            "0",
+            "--gid",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("NUL"));
+    }
+
+    #[test]
+    fn cli_validates_passthrough_argv_total() {
+        let mut argv = vec![
+            "squib-jail".to_string(),
+            "--id".to_string(),
+            "vm1".to_string(),
+            "--exec-file".to_string(),
+            "/usr/local/bin/squib".to_string(),
+            "--uid".to_string(),
+            "0".to_string(),
+            "--gid".to_string(),
+            "0".to_string(),
+            "--".to_string(),
+        ];
+        // Each element 4 KiB → six elements push past the 16 KiB total cap.
+        for _ in 0..6 {
+            argv.push("a".repeat(CHILD_ARG_MAX_BYTES - 1));
+        }
+        let parsed = Args::try_parse_from(&argv).expect("per-element cap allows 4 KiB args");
+        let err = parsed.validate_passthrough_argv_total().unwrap_err();
+        assert!(err.contains("max"));
     }
 
     #[test]

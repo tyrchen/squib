@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use squib_arch::IntId;
-use squib_bus::{Bus, BusDevice, BusError};
-use squib_core::GuestMemory;
+use squib_bus::{Bus, BusBuilder, BusDevice, BusError};
+use squib_core::{GuestMemory, HostDevName};
 use squib_fdt::VirtioSlot;
 use squib_gic::Gic;
 use squib_legacy::{Pl011, Pl011Sink};
@@ -125,8 +125,11 @@ pub struct DeviceBuildArgs {
 pub struct NetSpec {
     /// Operator-supplied iface_id (`/network-interfaces/{id}`).
     pub iface_id: String,
-    /// Caller-supplied host_dev_name (informational; the vmnet handle is derived).
-    pub host_dev_name: String,
+    /// Caller-supplied host device name (informational; the vmnet handle is derived).
+    /// `HostDevName` (squib-core) carries the boundary validation in the type system,
+    /// so a future direct construction of `NetSpec` cannot bypass the API-layer
+    /// length / NUL check (see `93-improvements-review.md` Phase 4 entry).
+    pub host_dev_name: HostDevName,
     /// Optional explicit guest MAC; falls back to a stable locally-administered
     /// default if absent.
     pub guest_mac: Option<[u8; 6]>,
@@ -141,7 +144,7 @@ impl std::fmt::Debug for NetSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NetSpec")
             .field("iface_id", &self.iface_id)
-            .field("host_dev_name", &self.host_dev_name)
+            .field("host_dev_name", &self.host_dev_name.as_str())
             .field("guest_mac", &self.guest_mac)
             .field("mtu", &self.mtu)
             .finish_non_exhaustive()
@@ -181,12 +184,17 @@ pub struct BlockConfigSpec {
 ///
 /// # Errors
 /// [`DeviceError`] for any per-device construction failure.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear sequence of device constructors; splitting hides the canonical boot-time \
+              order documented in 14-virtio-and-devices.md"
+)]
 pub fn build_device_layout(
     gic: Arc<dyn Gic + Send + Sync>,
     mem: Arc<dyn GuestMemory>,
     args: DeviceBuildArgs,
 ) -> Result<DeviceLayout, DeviceError> {
-    let bus = Arc::new(Bus::new());
+    let mut builder = BusBuilder::new();
     let mut allocator = SlotAllocator::new();
     let mut slots: Vec<VirtioSlot> = Vec::new();
 
@@ -198,7 +206,7 @@ pub fn build_device_layout(
             IntId::from_spi_cell(1).map_err(|e| DeviceError::IntId(e.to_string()))?,
         );
         let dev: Arc<Mutex<dyn BusDevice>> = Arc::new(Mutex::new(pl011));
-        bus.insert(dev, squib_arch::layout::PL011_BASE, 0x1000)?;
+        builder.insert(dev, squib_arch::layout::PL011_BASE, 0x1000)?;
     }
 
     // virtio-rng — every modern Linux kernel asks for entropy at boot;
@@ -208,7 +216,13 @@ pub fn build_device_layout(
     let rng = RngDevice::with_source(Arc::new(
         OsEntropy::try_new().map_err(|e| DeviceError::Entropy(e.to_string()))?,
     ));
-    plug_virtio(&bus, rng_slot, Arc::clone(&gic), Arc::clone(&mem), rng)?;
+    plug_virtio(
+        &mut builder,
+        rng_slot,
+        Arc::clone(&gic),
+        Arc::clone(&mem),
+        rng,
+    )?;
     slots.push(VirtioSlot {
         slot: rng_slot.index,
     });
@@ -228,7 +242,13 @@ pub fn build_device_layout(
             Arc::new(backend),
         );
         let block_slot = alloc_or_fail(&mut allocator)?;
-        plug_virtio(&bus, block_slot, Arc::clone(&gic), Arc::clone(&mem), block)?;
+        plug_virtio(
+            &mut builder,
+            block_slot,
+            Arc::clone(&gic),
+            Arc::clone(&mem),
+            block,
+        )?;
         slots.push(VirtioSlot {
             slot: block_slot.index,
         });
@@ -257,14 +277,20 @@ pub fn build_device_layout(
         let net = NetDevice::new(
             NetConfig {
                 iface_id: spec.iface_id,
-                host_dev_name: spec.host_dev_name,
+                host_dev_name: spec.host_dev_name.into_string(),
                 guest_mac: Some(spec.guest_mac.unwrap_or_else(default_guest_mac)),
                 mtu: Some(effective_mtu),
             },
             backend,
             Arc::new(mmds.clone()),
         );
-        plug_virtio(&bus, net_slot, Arc::clone(&gic), Arc::clone(&mem), net)?;
+        plug_virtio(
+            &mut builder,
+            net_slot,
+            Arc::clone(&gic),
+            Arc::clone(&mem),
+            net,
+        )?;
         slots.push(VirtioSlot {
             slot: net_slot.index,
         });
@@ -274,7 +300,7 @@ pub fn build_device_layout(
         let console_slot = alloc_or_fail(&mut allocator)?;
         let console = ConsoleDevice::new(ConsoleSink::Discard);
         plug_virtio(
-            &bus,
+            &mut builder,
             console_slot,
             Arc::clone(&gic),
             Arc::clone(&mem),
@@ -286,7 +312,7 @@ pub fn build_device_layout(
     }
 
     Ok(DeviceLayout {
-        bus,
+        bus: builder.build(),
         virtio_slots: slots,
         mmds,
     })
@@ -299,9 +325,9 @@ fn alloc_or_fail(allocator: &mut SlotAllocator) -> Result<Slot, DeviceError> {
 }
 
 /// Wrap `device` in a `VirtioMmioTransport` and insert it onto the
-/// bus at the slot's MMIO base.
+/// builder at the slot's MMIO base.
 fn plug_virtio<D: VirtioDevice + 'static>(
-    bus: &Bus,
+    builder: &mut BusBuilder,
     slot: Slot,
     gic: Arc<dyn Gic + Send + Sync>,
     mem: Arc<dyn GuestMemory>,
@@ -311,7 +337,7 @@ fn plug_virtio<D: VirtioDevice + 'static>(
     let irq = IrqLine::new(gic, slot.intid);
     let transport = VirtioMmioTransport::new(device_arc, mem, irq);
     let dev: Arc<Mutex<dyn BusDevice>> = Arc::new(Mutex::new(transport));
-    bus.insert(dev, slot.base, squib_virtio::VIRTIO_MMIO_REGION_BYTES)?;
+    builder.insert(dev, slot.base, squib_virtio::VIRTIO_MMIO_REGION_BYTES)?;
     Ok(())
 }
 
@@ -325,15 +351,21 @@ pub const fn default_guest_mac() -> [u8; 6] {
 impl NetSpec {
     /// Loopback / no-op host backend. Used in unit tests and as the safe
     /// fallback when no operator-supplied network mode is set.
-    #[must_use]
-    pub fn loopback(iface_id: impl Into<String>, host_dev_name: impl Into<String>) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Surfaces [`squib_core::IdentifierError`] when `host_dev_name` fails the
+    /// `HostDevName` boundary validation (empty / overlong / NUL byte).
+    pub fn loopback(
+        iface_id: impl Into<String>,
+        host_dev_name: impl Into<String>,
+    ) -> Result<Self, squib_core::IdentifierError> {
+        Ok(Self {
             iface_id: iface_id.into(),
-            host_dev_name: host_dev_name.into(),
+            host_dev_name: HostDevName::new(host_dev_name.into())?,
             guest_mac: None,
             mtu: None,
             backend: NetHostBackend::Loopback(LoopbackHostBackend::default()),
-        }
+        })
     }
 }
 
@@ -409,7 +441,7 @@ mod tests {
                     path: path.clone(),
                     read_only: true,
                 }),
-                net: Some(NetSpec::loopback("eth0", "tap0")),
+                net: Some(NetSpec::loopback("eth0", "tap0").unwrap()),
                 enable_console: false,
             },
         )
@@ -441,7 +473,7 @@ mod tests {
                 pl011_sink: Box::new(DiscardSink),
                 mmds_size_cap: 8192,
                 block: None,
-                net: Some(NetSpec::loopback("eth0", "tap0")),
+                net: Some(NetSpec::loopback("eth0", "tap0").unwrap()),
                 enable_console: false,
             },
         )

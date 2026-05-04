@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use squib_arch::{IntId, layout};
-use squib_bus::{Bus, BusDevice};
+use squib_bus::{BusBuilder, BusDevice};
 use squib_gic::{Gic, GicError, GicSizes};
 use squib_legacy::Pl011;
 use squib_vmm::{
@@ -164,7 +164,7 @@ fn test_runner_executes_stub_writes_pl011_then_psci_system_off() {
     assert_eq!(boot.kernel_load_addr, ENTRY_PC);
 
     // 2. Build a bus with PL011 at its canonical base.
-    let bus = Arc::new(Bus::new());
+    let mut builder = BusBuilder::new();
     let gic: Arc<dyn Gic + Send + Sync> = Arc::new(StubGic);
     let sink = CapturedSink::default();
     let pl011 = Pl011::new(
@@ -173,8 +173,10 @@ fn test_runner_executes_stub_writes_pl011_then_psci_system_off() {
         IntId::from_spi_cell(1).unwrap(),
     );
     let pl011_dyn: Arc<Mutex<dyn BusDevice>> = Arc::new(Mutex::new(pl011));
-    bus.insert(pl011_dyn, layout::PL011_BASE, 0x1000)
+    builder
+        .insert(pl011_dyn, layout::PL011_BASE, 0x1000)
         .expect("bus insert PL011");
+    let bus = builder.build();
 
     // 3. Take ownership of the HVF VM from the boot artifacts.
     let mut boot = boot;

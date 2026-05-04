@@ -113,10 +113,11 @@ impl GicState {
     /// Build a `GicState` from the bytes returned by `hv_gic_state_get_data`.
     #[must_use]
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self {
-            len: bytes.len() as u64,
-            bytes,
-        }
+        // `usize::try_from` to `u64` is infallible on 64-bit, but going through it
+        // surfaces the conversion in the type system — a 32-bit target would catch
+        // the overflow at compile time instead of silently truncating at runtime.
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        Self { len, bytes }
     }
 }
 

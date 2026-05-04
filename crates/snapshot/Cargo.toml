@@ -20,6 +20,13 @@ squib-arch = { workspace = true }
 squib-core = { workspace = true }
 
 bitcode = { workspace = true }
+# `criterion` is keyed off the optional `bench` feature so a plain
+# `cargo test -p squib-snapshot` does NOT pull it in (the previous shape kept
+# it as an unconditional dev-dependency, which dragged ~30 transitive crates
+# into every developer's `cargo build` even when nobody was running benches).
+# Per `93-improvements-review.md` § "Phase 7 deferred"; the finding is exactly
+# the `optional = true + dep:criterion` pattern below.
+criterion = { workspace = true, optional = true }
 crc64 = { workspace = true }
 parking_lot = { workspace = true }
 semver = { workspace = true }
@@ -32,12 +39,13 @@ tracing = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
 tempfile = { workspace = true }
 
 [features]
 default = []
-bench = []
+# Pulls criterion in as a normal dependency. Required for the `[[bench]]`
+# target and any consumer that wants to drive the benches programmatically.
+bench = ["dep:criterion"]
 
 [[bench]]
 name = "dirty_bitmap"

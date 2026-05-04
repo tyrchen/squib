@@ -58,12 +58,54 @@ fn apply_resource_limits(env: &JailerEnv) -> Result<()> {
 }
 
 fn daemonize() -> Result<()> {
+    // Standard double-fork sequence:
+    //
+    //   1. fork() — the launcher process exits, returning control to the shell so the squib-jail
+    //      invocation appears to complete instantly.
+    //   2. setsid() in the child — the child becomes the leader of a new session and detaches from
+    //      the controlling TTY. This is the call that fails with EPERM on a process that's
+    //      *already* a process group leader (most launcher invocations) — that's exactly the
+    //      failure the previous single-fork shape produced. By forking first we guarantee the child
+    //      is *not* a process-group leader, so setsid always succeeds.
+    //   3. fork() again — the grandchild inherits the new session but is *not* a session leader,
+    //      which means it can never reacquire a controlling TTY (a session leader that opens a TTY
+    //      without `O_NOCTTY` does so silently; the grandchild can't).
+    //
+    // After step 3, redirect stdio onto /dev/null and proceed with the
+    // chroot+setuid sequence inside the grandchild.
+    fork_or_exit_parent()?;
     // SAFETY: `setsid` takes no arguments and either succeeds or sets errno.
     let sid = unsafe { libc::setsid() };
     if sid == -1 {
         return Err(JailerError::Setsid(io::Error::last_os_error()));
     }
+    fork_or_exit_parent()?;
     redirect_stdio_to_dev_null()
+}
+
+/// `fork(2)` and exit the parent immediately on success, leaving control to the
+/// child. Returns `Ok(())` only inside the child process; the parent calls
+/// `_exit(0)` and never returns.
+fn fork_or_exit_parent() -> Result<()> {
+    // SAFETY: `fork(2)` is signal-safe, takes no arguments, and either succeeds
+    // or sets errno. We immediately handle the three return shapes (parent,
+    // child, error) without touching state that depends on the fork having
+    // succeeded in any particular way.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(JailerError::Setsid(io::Error::last_os_error()));
+    }
+    if pid > 0 {
+        // Parent: exit cleanly without running atexit handlers (none are
+        // registered, but `_exit` is the conventional choice — `exit(3)`
+        // would flush stdio buffers in both parent and child, double-printing
+        // any pending log line).
+        // SAFETY: `_exit` does not return.
+        unsafe {
+            libc::_exit(0);
+        }
+    }
+    Ok(())
 }
 
 fn redirect_stdio_to_dev_null() -> Result<()> {
@@ -157,20 +199,51 @@ fn exec(env: &JailerEnv, argv: &[CString]) -> Result<()> {
     let argv0 = argv.first().ok_or_else(|| {
         JailerError::Exec(env.exec_file_in_chroot(), io::Error::other("argv empty"))
     })?;
-    let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
-    ptrs.push(std::ptr::null());
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
 
-    // SAFETY: `execv(2)` reads `argv0` and `ptrs[..]` for the duration of the
-    // call only; on success it does not return so the borrows trivially
-    // outlive the call. `ptrs` is null-terminated as required.
+    // Curated environment: only PATH (with the standard system locations) and
+    // a couple of locale variables are passed through to the staged binary.
+    // Per `specs/40-jailer.md` § 3 step 7 + `specs/70-security.md` § 5, the
+    // launcher's full env (which may contain credentials, AWS_*, GITHUB_*,
+    // anything an operator typed into `~/.zshrc`) must NOT leak into the
+    // sandboxed child.
+    let env_vars = curated_envp();
+    let mut envp_ptrs: Vec<*const libc::c_char> = env_vars.iter().map(|c| c.as_ptr()).collect();
+    envp_ptrs.push(std::ptr::null());
+
+    // SAFETY: `execve(2)` reads `argv0`, `argv_ptrs[..]`, and `envp_ptrs[..]`
+    // for the duration of the call only; on success it does not return so the
+    // borrows trivially outlive the call. Both slices are null-terminated as
+    // required.
     unsafe {
-        libc::execv(argv0.as_ptr(), ptrs.as_ptr());
+        libc::execve(argv0.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
     }
-    // execv only returns on failure.
+    // execve only returns on failure.
     Err(JailerError::Exec(
         env.exec_file_in_chroot(),
         io::Error::last_os_error(),
     ))
+}
+
+/// Curated environment variables passed into the staged binary. Defence in depth:
+/// the chroot already cuts the staged binary off from anything outside its own
+/// tree, but environment variables travel by reference from the launcher and
+/// would otherwise leak credential-shaped values straight through.
+///
+/// `PATH` is set to the standard Apple system layout so the staged binary can
+/// resolve common helpers (`/bin/cat`, etc.) without further configuration;
+/// `LANG` / `LC_ALL` fall back to `C` for predictable parsing.
+fn curated_envp() -> Vec<CString> {
+    const ALLOWED: &[(&str, &str)] = &[
+        ("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+        ("LANG", "C"),
+        ("LC_ALL", "C"),
+    ];
+    ALLOWED
+        .iter()
+        .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
+        .collect()
 }
 
 #[cfg(test)]

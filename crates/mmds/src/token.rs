@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -183,33 +184,12 @@ fn read_csprng(buf: &mut [u8]) -> std::io::Result<()> {
     f.read_exact(buf)
 }
 
-/// URL-safe base64 (no padding). Hand-rolled to avoid pulling in another
-/// crate for a single 32-byte encode.
+/// URL-safe base64 (no padding) — RFC-4648 § 5 with the padding stripped.
+///
+/// Thin wrapper over [`base64::engine::general_purpose::URL_SAFE_NO_PAD`] so the
+/// allocation shape (return-by-value `String`) matches the one the issuer expects.
 fn base64url_no_pad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
-    let mut i = 0;
-    while i + 3 <= bytes.len() {
-        let n =
-            (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
-        out.push(ALPHABET[(n & 0x3F) as usize] as char);
-        i += 3;
-    }
-    let rem = bytes.len() - i;
-    if rem == 1 {
-        let n = u32::from(bytes[i]) << 16;
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-    } else if rem == 2 {
-        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8);
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
-    }
-    out
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(test)]

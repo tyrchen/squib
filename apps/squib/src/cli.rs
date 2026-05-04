@@ -115,6 +115,13 @@ pub(crate) struct Args {
     /// Falls back to `SQUIB_GVPROXY_PATH` and then `/usr/local/libexec/squib/gvproxy`.
     #[arg(long, value_name = "PATH", env = "SQUIB_GVPROXY_PATH")]
     pub(crate) gvproxy_path: Option<PathBuf>,
+
+    /// Host-side physical interface to bridge against when `--network=bridged` is in use
+    /// (e.g. `en0`, `en1`). When omitted, vmnet picks the primary interface — fine for
+    /// the inner-dev-loop default but operators with multi-NIC hosts need this knob to
+    /// disambiguate. Has no effect outside `--network=bridged`.
+    #[arg(long, value_name = "IFNAME")]
+    pub(crate) bridged_iface: Option<String>,
 }
 
 /// Firecracker-compatible log level set.

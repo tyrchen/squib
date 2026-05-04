@@ -27,11 +27,15 @@ cd "$(git rev-parse --show-toplevel)"
 
 CARGO=${CARGO:-cargo}
 SIGN_ID=${SIGN_ID:--}
+# `cargo metadata` is the source of truth for both the package version and the
+# target directory. We pipe through `jq`, which the rest of the project's CI
+# (Makefile `hvf-test`, `vmnet-test`) already requires — keeps the .pkg builder
+# free of a Python dependency that some CI runners ship without.
 VERSION=${VERSION:-$($CARGO metadata --format-version 1 --no-deps \
-  | python3 -c 'import sys, json; print(json.load(sys.stdin)["packages"][0]["version"])')}
+  | jq -r '.packages[0].version')}
 
 TARGET_DIR=$($CARGO metadata --format-version 1 --no-deps \
-  | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')
+  | jq -r '.target_directory')
 RELEASE_DIR="${TARGET_DIR}/aarch64-apple-darwin/release"
 PKG_OUT=${PKG_OUT:-"${RELEASE_DIR}/squib-${VERSION}.pkg"}
 

@@ -178,9 +178,13 @@ impl PageSource for FilePageSource {
             buf.fill(0);
             buf.len()
         };
-        if (n as u64) < req.page_size {
+        // `usize → u64` is infallible on every supported squib host (Apple
+        // Silicon is 64-bit), but `try_from` makes the widening explicit so the
+        // crate-level `cast_possible_truncation` allow no longer hides a wrap.
+        let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
+        if n_u64 < req.page_size {
             return Err(PageSourceError::Short {
-                got: n as u64,
+                got: n_u64,
                 expected: req.page_size,
             });
         }

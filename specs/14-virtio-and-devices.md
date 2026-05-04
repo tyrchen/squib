@@ -155,7 +155,7 @@ Caps are enforced at JSON-deserialization time (TryFrom), not at boot, so miscon
 | I-DEV-1 | Every virtio device passes its corresponding upstream Firecracker functional test. | Compat suite ([72-testing-strategy.md § 3](./72-testing-strategy.md#3-compat-suite)) |
 | I-DEV-2 | The MMIO bus dispatches reads / writes to exactly one device or returns `Error::NoDevice` (which surfaces as `MmioReadFault` to the guest, never as a panic). | Property test with random addresses |
 | I-DEV-3 | Rate limiters bound aggregate throughput within ±5% of the configured rate. | Per-device benchmark |
-| I-DEV-4 | virtio-mem hotplug `plug` / `unplug` of an N-block range performs exactly N `Vm::map_memory` / `Vm::unmap_memory` calls. | Unit test with a stub `Vm` |
+| I-DEV-4 | virtio-mem hotplug `plug` / `unplug` of an N-block range performs **either** exactly N `Vm::map_memory` / `Vm::unmap_memory` calls **or** one coalesced call covering `N × BLOCK_SIZE` (squib coalesces — one stage-2 TLB invalidate vs. N — see `crates/virtio/src/devices/mem.rs::test_should_plug_n_blocks_in_a_single_backend_call`). | Unit test with a stub `Vm` |
 | I-DEV-5 | Device config-space writes after `DRIVER_OK` return `VIRTIO_F_BAD_FEATURE` per the virtio spec. | Per-device unit test |
 
 ## 7. Cross-references

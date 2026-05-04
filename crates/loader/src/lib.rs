@@ -8,6 +8,21 @@
 //! `InstanceStart`, so a malformed kernel image returns a 4xx synchronously rather than
 //! detonating in the boot orchestrator.
 //!
+//! ## Trust boundary
+//!
+//! Per [70-security.md § 4](../../../specs/70-security.md#4-input-validation), every
+//! external string crossing into squib goes through a fallible-constructor newtype before
+//! reaching downstream code. For host-filesystem paths the canonical newtype is
+//! [`squib_api::schemas::common::SafePath`]: byte-length cap of 1024, NUL-byte rejection,
+//! charset / parent-traversal handled at the API layer.
+//!
+//! The loader sits below the API layer and accepts a `&Path` for `load_from_path`. To
+//! make the trust boundary load-bearing rather than aspirational, this crate also runs a
+//! **defence-in-depth** check on the path before opening it ([`enforce_path_bounds`]):
+//! length cap of 1024 bytes, NUL-byte rejection. A buggy caller that bypasses the API
+//! layer surfaces a [`LoaderError::PathRejected`] instead of letting a megabyte path or
+//! an interior-NUL path reach `std::fs::metadata`.
+//!
 //! See [13-arch-and-boot.md § 7](../../../specs/13-arch-and-boot.md#7-kernel-loader) and
 //! `arm64/booting.rst` for the boot-header contract.
 
@@ -118,6 +133,40 @@ pub enum LoaderError {
         /// Offset that overflowed.
         text_offset: u64,
     },
+
+    /// Path failed defence-in-depth boundary checks before any I/O ran.
+    #[error("kernel image path rejected at boundary: {0}")]
+    PathRejected(&'static str),
+}
+
+/// Length cap on a host-filesystem path the loader will open.
+///
+/// Mirrors `squib_api::schemas::common::SafePath::PATH_MAX` so a value that passed the
+/// API-layer boundary always passes the loader-layer boundary and a value that bypassed
+/// the API layer (a buggy direct caller) still gets rejected with [`LoaderError::PathRejected`].
+pub const PATH_MAX: usize = 1024;
+
+/// Defence-in-depth path validation, run before any `std::fs` call.
+///
+/// The canonical boundary is the API layer's `SafePath` newtype — but a buggy direct
+/// caller of [`load_from_path`] could in theory pass an unvalidated path. This function
+/// runs the same byte-cap and NUL-byte rejection that `SafePath::new` runs so the loader
+/// is correct in isolation. Returns a `'static` reason string suitable for embedding in
+/// [`LoaderError::PathRejected`] without leaking the path itself into error text.
+fn enforce_path_bounds(path: &Path) -> Result<(), LoaderError> {
+    let s = path
+        .to_str()
+        .ok_or(LoaderError::PathRejected("path is not valid UTF-8"))?;
+    if s.is_empty() {
+        return Err(LoaderError::PathRejected("path must not be empty"));
+    }
+    if s.len() > PATH_MAX {
+        return Err(LoaderError::PathRejected("path exceeds PATH_MAX bytes"));
+    }
+    if s.as_bytes().contains(&0) {
+        return Err(LoaderError::PathRejected("path contains a NUL byte"));
+    }
+    Ok(())
 }
 
 /// Recognized kernel image format.
@@ -267,8 +316,11 @@ pub fn load_from_path(path: &Path) -> Result<LoadedKernel, LoaderError> {
 /// [`load_from_path`] with explicit decompression caps.
 ///
 /// # Errors
-/// Surfaces [`LoaderError`] on any of the documented failure modes.
+/// Surfaces [`LoaderError`] on any of the documented failure modes, plus
+/// [`LoaderError::PathRejected`] when the path fails the loader's defence-in-depth
+/// boundary check (see crate-level "Trust boundary" docs).
 pub fn load_from_path_with_caps(path: &Path, caps: MaxSizes) -> Result<LoadedKernel, LoaderError> {
+    enforce_path_bounds(path)?;
     let metadata = std::fs::metadata(path)?;
     if metadata.len() > caps.compressed {
         return Err(LoaderError::CompressedTooLarge {

@@ -203,16 +203,16 @@ pub fn describe(state_path: &Path) -> Result<SnapshotDescription> {
     })
 }
 
-/// Best-effort `<id>.snap → <id>.mem` translation.
+/// Best-effort `<state> → <state-with-mem-extension>` translation.
 ///
-/// Only triggers when the file extension is exactly `.snap`. We do **not** try
-/// `.snap.gz`, `.snapshot`, or anything else; the operator can pass `--memory-path`
-/// explicitly when their naming convention diverges.
+/// Swaps whatever extension the state file carries (`.snap`, `.snapshot`, …) to `.mem`.
+/// The operator can always pass `--memory-path` explicitly when their naming convention
+/// produces a hint that doesn't match an actual file on disk.
+///
+/// Returns `None` only when the state path has *no* extension at all (in which case there
+/// is no obvious translation rule to apply).
 fn infer_memory_path(state_path: &Path) -> Option<std::path::PathBuf> {
-    let ext = state_path.extension()?.to_str()?;
-    if ext != "snap" {
-        return None;
-    }
+    state_path.extension()?;
     let mut p = state_path.to_path_buf();
     p.set_extension("mem");
     Some(p)
@@ -327,11 +327,23 @@ mod tests {
 
     #[test]
     fn test_should_infer_memory_path_from_state_path() {
+        // Canonical `.snap` → `.mem` mapping.
         assert_eq!(
             infer_memory_path(Path::new("/tmp/x.snap")),
             Some(std::path::PathBuf::from("/tmp/x.mem"))
         );
-        assert_eq!(infer_memory_path(Path::new("/tmp/x.bin")), None);
+        // Operators with a non-default extension (`.snapshot`, `.bin`, …) get the
+        // matching `.mem` hint regardless of stem.
+        assert_eq!(
+            infer_memory_path(Path::new("/tmp/x.snapshot")),
+            Some(std::path::PathBuf::from("/tmp/x.mem"))
+        );
+        assert_eq!(
+            infer_memory_path(Path::new("/tmp/x.bin")),
+            Some(std::path::PathBuf::from("/tmp/x.mem"))
+        );
+        // Pathological case: no extension at all → no obvious translation rule,
+        // still returns None.
         assert_eq!(infer_memory_path(Path::new("/tmp/x")), None);
     }
 

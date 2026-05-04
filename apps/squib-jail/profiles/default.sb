@@ -39,9 +39,12 @@
   (subpath "/run"))
 
 ;; Mach lookups. The vmnet sharing service is reached via mach-bootstrap.
+;; `configd` removed: integration traces showed squib does not consult
+;; `com.apple.SystemConfiguration.configd` directly — vmnet handles its
+;; own configd lookups inside the framework, and squib never opens an
+;; SCDynamicStore. Re-add only when a guarded test demonstrates a need.
 (allow mach-lookup
-  (global-name "com.apple.vmnet")
-  (global-name "com.apple.SystemConfiguration.configd"))
+  (global-name "com.apple.vmnet"))
 
 ;; Networking. UDS only — outbound TCP/UDP is denied by the default-deny
 ;; above; we explicitly re-allow only loopback unix-socket traffic that
@@ -50,8 +53,23 @@
 (allow network-outbound (local unix-socket))
 
 ;; Sysctl reads — squib reads /proc-equivalent sysctl knobs at startup
-;; for HVF capability detection.
-(allow sysctl-read)
+;; for HVF capability detection. Scope to the names that squib actually
+;; queries (`hw.optional.arm.FEAT_*` and a handful of `kern.*` boot probes)
+;; instead of the unrestricted form. Tightens the sandbox without breaking
+;; any documented call site; new sysctl names need an explicit allowlist
+;; entry rather than silently going through.
+(allow sysctl-read
+  (sysctl-name-prefix "hw.optional.arm.FEAT_")
+  (sysctl-name "hw.activecpu")
+  (sysctl-name "hw.ncpu")
+  (sysctl-name "hw.physicalcpu")
+  (sysctl-name "hw.logicalcpu")
+  (sysctl-name "hw.memsize")
+  (sysctl-name "hw.pagesize")
+  (sysctl-name "kern.osproductversion")
+  (sysctl-name "kern.osversion")
+  (sysctl-name "kern.version")
+  (sysctl-name "kern.boottime"))
 
 ;; Hypervisor entitlement is enforced separately at codesign time
 ;; (`com.apple.security.hypervisor`); the sandbox cannot tighten it

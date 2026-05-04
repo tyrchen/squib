@@ -63,8 +63,6 @@ parking_lot = "0.12"
 smallvec = { version = "1.15", features = ["serde", "union"] }
 arc-swap = "1.7"
 
-# validation
-validator = { version = "0.20", features = ["derive"] }
 
 # HTTP server (squib-api)
 axum = { version = "0.8", default-features = false, features = [
@@ -115,6 +113,10 @@ libc = "0.2"
 # Apple Block ABI shim. Used by squib-net to construct the callback blocks
 # `vmnet.framework` consumes. Maintained by the objc2 ecosystem.
 block2 = "0.6"
+
+# URL-safe base64 (no padding). Used by squib-mmds for the V2 token wire form
+# and by future consumers needing RFC-4648 § 5 encodings.
+base64 = { version = "0.22", default-features = false, features = ["std"] }
 
 # benchmarking
 criterion = { version = "0.8", default-features = false, features = [

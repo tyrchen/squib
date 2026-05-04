@@ -45,6 +45,8 @@ use squib_gic::GicSizes;
 use squib_hv::HvfHypervisor;
 
 #[test]
+#[ignore = "requires com.apple.security.hypervisor entitlement on the test binary; run via `make \
+            hvf-test`"]
 fn hvf_round_trips_an_hvc_trap_via_real_vcpu() {
     // ARM64 `HVC #0` encodes to 0xD400_0002. Stored little-endian in guest RAM:
     const HVC_HASH_0: [u8; 4] = [0x02, 0x00, 0x00, 0xD4];

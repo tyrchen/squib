@@ -26,6 +26,10 @@ fn synth_kernel() -> Vec<u8> {
 
 fn write_tmp() -> PathBuf {
     let path = std::env::temp_dir().join("squib-vmm-bench-kernel.bin");
+    // Synchronous write of a 256-byte fixture during bench setup; tokio::fs is
+    // async-only and would require a runtime spin-up the bench doesn't otherwise
+    // need. Per-bench setup is single-threaded.
+    #[allow(clippy::disallowed_methods)]
     std::fs::write(&path, synth_kernel()).expect("write tmp kernel");
     path
 }

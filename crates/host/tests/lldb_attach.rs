@@ -49,7 +49,7 @@ fn pager_lifecycle_accepts_shutdown_in_lldb_after_ordering() {
     // → squib-pager remains responsive → shutdown → join.
     let pager = make_pager();
     pager.register_region(0x8000_0000, 0x1000_0000);
-    let join = spawn_mach_server(&pager);
+    let join = spawn_mach_server(&pager).expect("spawn pager");
 
     // Let the drift-check tick at least twice.
     thread::sleep(Duration::from_millis(150));
@@ -77,7 +77,7 @@ fn pager_lifecycle_accepts_shutdown_in_lldb_before_ordering() {
     // pager spawns, runs its drift loop, and exits on shutdown.
     let pager = make_pager();
     pager.register_region(0x8000_0000, 0x1000_0000);
-    let join = spawn_mach_server(&pager);
+    let join = spawn_mach_server(&pager).expect("spawn pager");
     thread::sleep(Duration::from_millis(120));
     pager.request_shutdown();
     wait_for_join(join, Duration::from_secs(5))

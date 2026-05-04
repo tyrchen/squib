@@ -1,0 +1,17 @@
+# Example firecracker-containerd runtime.toml for soak runs against squib.
+#
+# Copy to /etc/firecracker-containerd/runtime.toml and adjust the
+# `firecracker_binary_path` to point at your codesigned squib build. On macOS
+# the canonical path after `make sign` is the `target/release/squib` binary;
+# `which squib` if installed via Homebrew or the `.pkg`.
+
+firecracker_binary_path = "/usr/local/bin/squib"
+kernel_image_path       = "/var/lib/firecracker-containerd/runtime/default-vmlinux.bin"
+kernel_args             = "console=ttyAMA0 reboot=k panic=1 pci=off"
+root_drive              = "/var/lib/firecracker-containerd/runtime/default-rootfs.img"
+
+[jailer]
+  # squib-jail is flag-compatible with upstream jailer per specs/40-jailer.md.
+  jailer_binary_path = "/usr/local/bin/squib-jail"
+  uid = 0
+  gid = 0

@@ -235,6 +235,33 @@ What this means for the Phase 4 exit criterion: **the live FFI surface is now ve
 
 - **P3** — `specs/30-networking.md` § 4 requires `gvproxy` to ship under `<install-prefix>/libexec/squib/gvproxy`, but the `.pkg` builder (`dist/pkg/build-pkg.sh`) does not stage it. The Phase 4 review row "gvproxy bundling — binary not yet vendored" already tracks the underlying vendoring work. Phase 6 inherits the dependency: until a checksummed `gvproxy` lands in `vendors/gvproxy/`, the .pkg installer ships without userspace networking, and the Homebrew formula similarly cannot install it.
 
+## Phase 7 (lands at end of Phase 7 review pass)
+
+### Resolved in this phase
+
+- ~~**P2** — `crates/snapshot/src/save.rs:116` `dirty.expect("checked above")` — replaced with a `let-else` inside the `Diff` arm. No reachable panic on the `PUT /snapshot/create` path. (Phase 5 fixup.)~~
+- ~~**P2** — `crates/host/src/pager.rs:524, 565` `expect("squib-pager thread spawn")` — `spawn_mach_server` now returns `Result<JoinHandle<…>, PagerError::Spawn>`; tests propagate via `.expect()` (test-only). (Phase 5 fixup.)~~
+- ~~**P2** — `crates/hv/tests/hvf_smoke.rs::hvf_round_trips_an_hvc_trap_via_real_vcpu` was missing `#[ignore]` so a vanilla `cargo test --workspace` failed on the unsigned binary. Added `#[ignore = "requires com.apple.security.hypervisor — run via make hvf-test"]`. (Phase 6 fixup; `make hvf-test` already passes `--include-ignored`.)~~
+- ~~**P2** — I-SEC-1 in `specs/70-security.md` § 2 / § 9 listed only `squib-hv` and `squib-net::sys`. Amended to enumerate `squib-hv`, `squib-net::sys`, `squib-host`, and `squib-jail`, with a one-line note that the per-crate justification is *FFI surface*, not relaxed soundness. (Phase 6 fixup.)~~
+
+### Compat-suite parity at the wire layer (in-phase)
+
+- The compat suite under `tests/firecracker-compat/` covers every endpoint, the upstream-only 504 deviation, and a representative slice of P/A/R rows. The remaining gap — F-row replays of upstream `docs/api_requests/` *examples* byte-for-byte — needs the request fixtures vendored under `tests/firecracker-compat/transcripts/` and a JSON loader that drives [`Transcript`] from disk. Fix shape: add `serde_json::from_str::<Transcript>` deserialisation and walk `vendors/firecracker/docs/api_requests/*.json` in a single `#[test]`. Out-of-phase because byte-equal upstream replay is gated on the Phase 1 vCPU run-loop tail (live `InstanceStart` returning 204).
+
+### Live perf numbers gated on Phase 1 tail
+
+- **P1** — Phase 7 publishes the bench *substrate* numbers in `docs/perf/<sha>/` (dirty-bitmap + planning step) but the live P1 / P2 / P3 / P4 / P5 / P7 axes — boot to `/sbin/init`, RSS overhead, vCPU exit, vmnet throughput, block IO, postcopy first-response — all need a live VM event loop. Each is wired in the bench harness skeleton; they light up the moment Phase 1's vCPU thread + kernel image lands. See `docs/perf/index.md` "Targets vs status" table for the per-axis state. Cross-references the existing "Phase 1 (lands at end of Phase 1.6) — Boot-to-busybox smoke test" entry above.
+
+### Soak harness scaffolds shipped, runners gated
+
+- **P2** — `tools/soak/{firectl,firecracker-go-sdk,firecracker-containerd}/run.sh` exist and `make soak` walks them. Each runner SKIPs cleanly when its SDK is missing; when present, the runners surface the documented stub-VMM `fault_message` ("VMM not yet wired") on `InstanceStart`. End-to-end SDK pass requires the same Phase 1 tail; the harness is in place to flip from WARN to PASS the day the live VMM lands.
+
+### Deferred from Phase 7 review
+
+- **P2** — `crates/snapshot/Cargo.toml:34` and `crates/vmm/Cargo.toml:39` register `criterion` as an unconditional `dev-dependency`. Bench targets are gated on `required-features = ["bench"]`, so plain `cargo test -p squib-snapshot` pulls criterion + ~30 transitive crates it never uses. Fix shape: gate `criterion` behind an optional dependency flipped on by the `bench` feature (`criterion = { workspace = true, optional = true }` + `bench = ["dep:criterion"]`).
+
+- **P2** — `tests/firecracker-compat/tests/f_rows.rs` covers most rows in `21-api-compat-matrix.md § 1` but is missing a row-by-row stub-VMM F-test for `GET /balloon/statistics`, `PATCH /balloon/statistics`, `PUT /snapshot/create` (expected 400 with the documented stub `fault_message`), `PUT /snapshot/load` (same), `PATCH /vm` (post-boot Pause/Resume), and `PUT /actions {InstanceStart}` (expected 400 with stub `fault_message`). Fix shape: add one mechanical happy-path test per row, marking the inherently-stubbed actions as expected-400 so they convert cleanly when Phase 1's vCPU tail lands.
+
 ## Cross-references
 
 - ← Read by: every phase as the place to land out-of-phase findings.

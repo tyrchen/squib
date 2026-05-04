@@ -168,6 +168,12 @@ impl NetworkMode {
     /// manager consumes. `Bridged` is only supported when squib is built with
     /// the `bridged` cargo feature; otherwise an error is returned and the
     /// caller should `bail!` on the message.
+    //
+    // The Result wrap is conditional on the `bridged` feature; clippy's
+    // `unnecessary_wraps` only fires in the bridged build because every arm
+    // returns `Ok`. The default (non-bridged) build's `Bridged` arm
+    // legitimately returns `Err`, so the Result is required there.
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn to_net_mode(self) -> Result<squib_net::NetMode, &'static str> {
         match self {
             Self::Shared => Ok(squib_net::NetMode::SHARED),

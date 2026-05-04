@@ -243,4 +243,54 @@ demo: build-reference-vm
 	@$(CARGO) test -p squib-vmm --test linux_boot_smoke -- \
 	    --nocapture --include-ignored test_reference_vm_boots_linux_and_curls_mmds
 
-.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged sign-jail sign-all verify verify-squib verify-jail verify-jail-preserves-entitlements hvf-test vmnet-test snapshot-smoke build-reference-vm demo notarize release update-submodule pkg homebrew-formula
+# Run the Firecracker compatibility suite. Top-level integration tests live in
+# `tests/firecracker-compat/`; each `tests/*.rs` exercises one row in
+# `specs/21-api-compat-matrix.md` against the real `squib-api` axum router on a
+# per-test UDS. No HVF / vmnet entitlement is required because the suite verifies
+# *wire-shape* parity against a stub VMM event loop.
+compat-test:
+	@$(CARGO) test -p firecracker-compat --tests
+
+# Run the criterion bench harness and stash the JSON output under
+# `docs/perf/<git-sha>/<bench>.json`. Per `specs/71-performance-budgets.md` § 7
+# the published numbers live in `docs/perf/`; this target is the pipe.
+#
+# `cargo bench` writes `target/criterion/<bench>/new/estimates.json` (and the HTML
+# report) per axis. The Phase 1 skeleton bench in `crates/vmm/benches/boot.rs`
+# requires the `bench` feature flag.
+PERF_OUT := docs/perf/$(shell git rev-parse --short HEAD 2>/dev/null || echo unstaged)
+BENCH_FLAGS := --warm-up-time 1 --measurement-time 3 --sample-size 10
+bench-publish:
+	@mkdir -p $(PERF_OUT)
+	@$(CARGO) bench --features bench -p squib-vmm      --bench boot          -- $(BENCH_FLAGS) || true
+	@$(CARGO) bench --features bench -p squib-snapshot --bench dirty_bitmap  -- $(BENCH_FLAGS) || true
+	@criterion_dir="$$($(CARGO) metadata --format-version 1 --no-deps | jq -r '.target_directory')/criterion"; \
+	  if [ -d "$$criterion_dir" ]; then \
+	    cp -R "$$criterion_dir"/* $(PERF_OUT)/ 2>/dev/null || true; \
+	    echo "perf numbers published under $(PERF_OUT)"; \
+	  else \
+	    echo "no criterion output produced at $$criterion_dir (bench may have failed)"; exit 1; \
+	  fi
+
+# Soak harness for orchestrator SDKs (firectl, firecracker-go-sdk, firecracker-
+# containerd). Per `specs/91-impl-plan.md` § 10 Phase 7.4 each external SDK is a
+# checked-in `tools/soak/<sdk>/run.sh` that spins up squib on a per-test UDS,
+# drives the SDK against it, and reports pass/fail. This umbrella target probes
+# each SDK's runner and skips with a one-line note when the binary is missing.
+SOAK_RUNNERS := tools/soak/firectl/run.sh tools/soak/firecracker-go-sdk/run.sh tools/soak/firecracker-containerd/run.sh
+soak:
+	@fail=0; \
+	for runner in $(SOAK_RUNNERS); do \
+	  if [ -x "$$runner" ]; then \
+	    echo "=== $$runner ==="; \
+	    if ! $$runner; then \
+	      echo "[$$runner] FAILED"; \
+	      fail=1; \
+	    fi; \
+	  else \
+	    echo "[$$runner] SKIP (not installed; see tools/soak/README.md)"; \
+	  fi; \
+	done; \
+	exit $$fail
+
+.PHONY: build build-release test lint fmt fmt-check audit deny doc run sign sign-bridged sign-jail sign-all verify verify-squib verify-jail verify-jail-preserves-entitlements hvf-test vmnet-test snapshot-smoke build-reference-vm demo notarize release update-submodule pkg homebrew-formula compat-test bench-publish soak

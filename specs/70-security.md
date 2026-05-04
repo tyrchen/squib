@@ -26,8 +26,8 @@ Out of scope: side-channel attacks across guests, Spectre-class issues already m
 
 Per CLAUDE.md § Safety & Security:
 
-- `#![forbid(unsafe_code)]` at the crate root of every crate **except** `squib-hv` and `squib-net::sys`.
-- The two unsafe-bearing crates have ~50 and ~300 lines of `unsafe` respectively, each block prefixed with `// SAFETY:` referencing the framework contract it relies on.
+- `#![forbid(unsafe_code)]` at the crate root of every crate **except** `squib-hv`, `squib-net::sys`, `squib-host`, and `squib-jail`. The latter two were widened during Phase 5 / Phase 6: `squib-host` carries the Mach exception-port FFI for the postcopy pager (lifecycle skeleton today; live `mach_msg` server feature-gated per [`93-improvements-review.md` Phase 5](../specs/93-improvements-review.md#phase-5-lands-at-end-of-phase-5-review-pass)); `squib-jail` calls libc privilege-drop syscalls and `sandbox_init(3)`.
+- Each unsafe-bearing crate carries a `// SAFETY:` comment per `unsafe` block referencing the framework contract it relies on. Code review for any change that adds or relaxes an `unsafe` block requires explicit sign-off — the per-crate justification is *FFI surface*, not relaxed soundness.
 - No transmute between unrelated types, no aliasing `&mut`, no uninitialized reads, no out-of-bounds. `cargo +nightly miri test` runs against the test suite excluding HVF-touching tests.
 - Boundary modules (`squib-api`, `RuntimeApiController`'s action dispatch) lint with `clippy::unwrap_used`, `clippy::expect_used`, `clippy::indexing_slicing`, `clippy::panic`, `clippy::expect_used` denied.
 - Library crates use `thiserror`-derived enum errors; the CLI uses `anyhow` only at `main.rs`.
@@ -133,7 +133,7 @@ Reachable panics from external input are denied at lint level. The `RuntimeApiCo
 
 | # | Invariant | Pinned by |
 |---|-----------|-----------|
-| I-SEC-1 | `unsafe` lives only in `squib-hv` and `squib-net::sys`. | CI grep + `#![forbid(unsafe_code)]` everywhere else |
+| I-SEC-1 | `unsafe` lives only in `squib-hv`, `squib-net::sys`, `squib-host`, and `squib-jail`. | CI grep + `#![forbid(unsafe_code)]` everywhere else |
 | I-SEC-2 | Every external string field has a length cap and a regex / charset allowlist. | Per-field `validator` rules; compat suite asserts oversized inputs return 4xx |
 | I-SEC-3 | Every external integer has a range cap. | Per-field `validator` rules |
 | I-SEC-4 | No `panic!`, `unwrap`, `expect`, `[]`-indexing, `unreachable!`, `todo!` reachable from API input. | Lint denied in boundary modules |

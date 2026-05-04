@@ -310,6 +310,10 @@ pub enum PagerError {
     /// Mach-side error (always opaque; the OS surfaces these via `kern_return_t`).
     #[error("mach error: {0}")]
     Mach(String),
+    /// `pthread_create` / `thread::Builder::spawn` failed, typically with EAGAIN
+    /// (per-process thread limit reached). DoS-relevant on a multi-VM host.
+    #[error("pager server thread spawn: {0}")]
+    Spawn(#[source] std::io::Error),
 }
 
 /// Boundaries of one registered postcopy region.
@@ -511,8 +515,13 @@ mod mach_imp {
     /// skeleton always returns `Ok(())`; the live `mach_msg` path will surface
     /// errors via [`PagerError::Mach`], which is why the result type stays in the
     /// signature even though the skeleton never produces an `Err`.
-    #[must_use]
-    pub fn spawn_server(pager: &Pager) -> JoinHandle<Result<(), PagerError>> {
+    ///
+    /// # Errors
+    /// [`PagerError::Spawn`] when `thread::Builder::spawn` fails (typically
+    /// EAGAIN on per-process thread cap exhaustion). Squib-host is a library —
+    /// we never panic on a thread-spawn failure that's reachable from a
+    /// long-running daemon.
+    pub fn spawn_server(pager: &Pager) -> Result<JoinHandle<Result<(), PagerError>>, PagerError> {
         let handle = pager.handle();
         thread::Builder::new()
             .name("squib-pager".into())
@@ -520,7 +529,7 @@ mod mach_imp {
                 run_server_loop(&handle);
                 Ok(())
             })
-            .expect("squib-pager thread spawn")
+            .map_err(PagerError::Spawn)
     }
 
     fn run_server_loop(handle: &PagerHandle) {
@@ -556,12 +565,17 @@ pub use mach_imp::spawn_server as spawn_mach_server;
 
 /// Stub on non-macOS targets so cross-platform tests still compile. Returns
 /// immediately with `Ok(())`.
+///
+/// # Errors
+/// [`PagerError::Spawn`] when `thread::Builder::spawn` fails.
 #[cfg(not(target_os = "macos"))]
-pub fn spawn_mach_server(_pager: &Pager) -> std::thread::JoinHandle<Result<(), PagerError>> {
+pub fn spawn_mach_server(
+    _pager: &Pager,
+) -> Result<std::thread::JoinHandle<Result<(), PagerError>>, PagerError> {
     std::thread::Builder::new()
         .name("squib-pager-stub".into())
         .spawn(|| Ok(()))
-        .expect("stub pager thread spawn")
+        .map_err(PagerError::Spawn)
 }
 
 #[cfg(test)]

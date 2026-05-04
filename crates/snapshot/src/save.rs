@@ -87,11 +87,6 @@ pub fn save<R: PageReader>(req: SaveRequest<'_, R>) -> Result<SaveReport> {
         dirty,
     } = req;
 
-    if matches!(kind, SnapshotKind::Diff) && dirty.is_none() {
-        return Err(SnapshotError::InvalidPath(
-            "Diff snapshot requires track_dirty_pages=true and a dirty bitmap".into(),
-        ));
-    }
     if matches!(kind, SnapshotKind::Diff) && !state.vm_info.track_dirty_pages {
         return Err(SnapshotError::InvalidPath(
             "Diff snapshot requested but vm_info.track_dirty_pages is false".into(),
@@ -105,7 +100,9 @@ pub fn save<R: PageReader>(req: SaveRequest<'_, R>) -> Result<SaveReport> {
     let envelope = Snapshot::new(state);
     envelope.save(state_writer.file_mut())?;
 
-    // Step 2 — write the memory file.
+    // Step 2 — write the memory file. The Diff branch's bitmap is destructured
+    // via let-else so no `expect()` lives on a path reachable from the API
+    // (D25 / 93-improvements-review.md, Phase 5).
     let mut mem_writer = MemoryWriter::open(memory_path, ram_size, memory_page_size)?;
     let pages_written = match kind {
         SnapshotKind::Full => {
@@ -113,7 +110,11 @@ pub fn save<R: PageReader>(req: SaveRequest<'_, R>) -> Result<SaveReport> {
             0
         }
         SnapshotKind::Diff => {
-            let bitmap = dirty.expect("checked above");
+            let Some(bitmap) = dirty else {
+                return Err(SnapshotError::InvalidPath(
+                    "Diff snapshot requires track_dirty_pages=true and a dirty bitmap".into(),
+                ));
+            };
             mem_writer.write_diff(memory, bitmap)?
         }
     };

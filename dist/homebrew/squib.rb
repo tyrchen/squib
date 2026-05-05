@@ -42,7 +42,7 @@ class Squib < Formula
   # files, so the pin lives twice — bump both together as part of release prep).
   resource "gvproxy" do
     url "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.7/gvproxy-darwin"
-    sha256 "PLACEHOLDER_PIN_AT_RELEASE_PREP_TIME"
+    sha256 "6d3b764d22bd3cc7faadf9ffa56ae638924825631be9b0344a695817c2ffda1e"
   end
 
   def install

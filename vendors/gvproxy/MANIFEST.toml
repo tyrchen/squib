@@ -35,10 +35,10 @@ asset = "gvproxy-darwin"
 # computes the SHA-256 of the downloaded file and refuses to install a binary
 # whose hash doesn't match.
 url = "https://github.com/containers/gvisor-tap-vsock/releases/download/v0.8.7/gvproxy-darwin"
-sha256 = "PLACEHOLDER_PIN_AT_RELEASE_PREP_TIME"
+sha256 = "6d3b764d22bd3cc7faadf9ffa56ae638924825631be9b0344a695817c2ffda1e"
 
 # License — gvproxy is Apache-2.0; the source `LICENSE` file is fetched alongside the binary
 # and installed to `<prefix>/share/squib/licenses/gvproxy.LICENSE` so the bundled
 # distribution carries the attribution `specs/30-networking.md` § 4 mandates.
 license_url = "https://raw.githubusercontent.com/containers/gvisor-tap-vsock/v0.8.7/LICENSE"
-license_sha256 = "8a0a40fde9e5df7c6fb98ab22a30a0d0dc0d0dc0d0dc0d0dc0d0dc0d0dc0d0dc"
+license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"

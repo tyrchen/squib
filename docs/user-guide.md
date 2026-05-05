@@ -36,12 +36,24 @@ and follow the prompts. The installer drops `/usr/local/bin/squib`,
 
 ### Option B — Homebrew
 
-```bash
-brew install --HEAD --build-from-source ./dist/homebrew/squib.rb
+Homebrew 4.x rejects formulae installed from a local file path — the formula
+must live in a tap. One-time setup, then install. The tap path is fixed under
+`/opt/homebrew` on Apple Silicon (squib is arm64-only), so the literal path
+below works in any shell — bash, zsh, fish, nushell — without depending on
+`$(brew --repo …)` command substitution syntax:
+
+```
+brew tap-new tyrchen/squib
+cp dist/homebrew/squib.rb /opt/homebrew/Library/Taps/tyrchen/homebrew-squib/Formula/squib.rb
+brew install --HEAD --build-from-source tyrchen/squib/squib
 ```
 
+To re-install after editing the formula, recopy and run
+`brew reinstall --HEAD tyrchen/squib/squib`.
+
 The formula is HEAD-only until the first tagged release; after tagging it
-points at the notarized `.pkg`.
+points at the notarized `.pkg` and the tap will be published so the
+`tap-new` + `cp` step is no longer necessary.
 
 ### Option C — Build from source
 

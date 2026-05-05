@@ -227,7 +227,13 @@ notarize: pkg
 # update the `url` + `sha256` fields automatically.
 homebrew-formula:
 	@echo "Homebrew formula at: dist/homebrew/squib.rb"
-	@echo "Install with: brew install --HEAD --build-from-source ./dist/homebrew/squib.rb"
+	@echo "Homebrew 4.x rejects local-path installs; the formula must live in a tap."
+	@echo "One-time setup (path is fixed under /opt/homebrew on Apple Silicon, so"
+	@echo "this works in any shell — bash, zsh, fish, nu):"
+	@echo "  brew tap-new tyrchen/squib"
+	@echo "  cp dist/homebrew/squib.rb /opt/homebrew/Library/Taps/tyrchen/homebrew-squib/Formula/squib.rb"
+	@echo "Install:"
+	@echo "  brew install --HEAD --build-from-source tyrchen/squib/squib"
 
 release:
 	@$(CARGO) release tag --execute

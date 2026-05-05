@@ -12,8 +12,18 @@
 # After the first tagged release, add a `url` + `sha256` for the release
 # tarball and gate the HEAD path under `head do`.
 #
-# Usage:
-#   brew install --HEAD --build-from-source ./dist/homebrew/squib.rb
+# Usage (Homebrew rejects local-path installs since 4.x — the formula must
+# live in a tap). One-time setup, then install. Paths are fixed under
+# /opt/homebrew on Apple Silicon (squib is arm64-only — see R10), so the
+# literal path works in any shell (bash, zsh, fish, nu) without needing
+# $(brew --repo …) command substitution:
+#
+#   brew tap-new tyrchen/squib
+#   cp dist/homebrew/squib.rb /opt/homebrew/Library/Taps/tyrchen/homebrew-squib/Formula/squib.rb
+#   brew install --HEAD --build-from-source tyrchen/squib/squib
+#
+# Re-install after editing the formula: recopy, then
+# `brew reinstall --HEAD tyrchen/squib/squib`.
 class Squib < Formula
   desc "macOS-native microVM monitor with a Firecracker-compatible API"
   homepage "https://github.com/tyrchen/squib"

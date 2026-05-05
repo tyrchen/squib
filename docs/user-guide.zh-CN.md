@@ -36,12 +36,21 @@ Guest 只跑 aarch64 Linux。
 
 ### 方式 B：Homebrew
 
-```bash
-brew install --HEAD --build-from-source ./dist/homebrew/squib.rb
+Homebrew 4.x 起不再接受从本地文件路径安装 formula —— 必须先把它放进一个
+tap。一次性配置好之后再安装。Apple Silicon 上 tap 路径固定在 `/opt/homebrew`
+下（squib 只支持 arm64），所以下面这条命令在 bash、zsh、fish、nushell 任一
+shell 里都能直接跑，不依赖 `$(brew --repo …)` 这种命令替换语法：
+
+```
+brew tap-new tyrchen/squib
+cp dist/homebrew/squib.rb /opt/homebrew/Library/Taps/tyrchen/homebrew-squib/Formula/squib.rb
+brew install --HEAD --build-from-source tyrchen/squib/squib
 ```
 
+formula 改动后要重装，先重新 `cp` 一次再 `brew reinstall --HEAD tyrchen/squib/squib`。
+
 第一个正式 tag 之前，formula 只支持 HEAD 安装；打 tag 之后会指向公证过的
-`.pkg`。
+`.pkg`，tap 也会正式发布，到时候就不再需要 `tap-new` + `cp` 这两步。
 
 ### 方式 C：源码编译
 

@@ -11,6 +11,8 @@ publishes — but on top of HVF + `vmnet.framework` rather than KVM + Linux TAP.
 - Networking: `--network={shared|bridged|host|userspace}` — vmnet for the
   entitled cases, gvproxy for the rest.
 
+中文：[README.zh-CN.md](./README.zh-CN.md)。
+
 ## Status
 
 > Pre-1.0. Phase 7 ("compat suite + perf + polish") is in flight; the live
@@ -42,6 +44,12 @@ make demo                   # codesigned HVF integration test
 
 ## Documentation
 
+- **User guide** in [`docs/user-guide.md`](./docs/user-guide.md)
+  ([中文](./docs/user-guide.zh-CN.md)) — install, boot a guest, drive it from
+  an SDK, snapshot/restore, troubleshoot.
+- **Developer guide** in [`docs/dev-guide.md`](./docs/dev-guide.md)
+  ([中文](./docs/dev-guide.zh-CN.md)) — workspace layout, build/test loops,
+  HVF codesigning, where to plug in for new features.
 - **Specs** under [`specs/`](./specs/index.md) — design, data model, runtime,
   HVF backend, devices, MMDS, snapshots, networking, jailer, CLI.
 - **Research** under [`docs/research/`](./docs/research/index.md) — prior-art deep

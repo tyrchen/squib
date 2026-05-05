@@ -1,4 +1,11 @@
 [default.extend-words]
+flate = "flate"
+Sur = "Sur"
+mis = "mis"
+SME = "SME"
+compileable = "compileable"
+fo = "fo"
+earlies = "earlies"
 
 [files]
 extend-exclude = ["CHANGELOG.md", "vendors/"]

@@ -4,24 +4,35 @@
 //! Firecracker-compatible CLI flag set documented in [50-cli.md](../../specs/50-cli.md)
 //! and starts the API server on a Unix domain socket.
 //!
-//! Phase 2 ships the full API surface against a stub VMM event loop; the HVF backend
-//! is wired in by Phase 1. Until the HVF/runtime pieces land, every dispatched
-//! `ApiAction` returns a `204 No Content` for `Put*`/`Patch*`/`Delete*` and a
-//! `400 BadRequest` with `fault_message="VMM not yet wired"` for `Action(InstanceStart)`
-//! / `PUT /snapshot/*` so orchestrators get a deterministic shape rather than a hang.
+//! macOS build: the API server is backed by the live HVF VMM event
+//! loop (`vmm_loop`), which drives `build_microvm_for_boot` +
+//! `run_microvm_with_budget` against accumulated API state, and a
+//! UDS-backed vsock multiplexer (`vsock_muxer`). Non-macOS builds
+//! retain the Phase-2 stub so the cross-platform check pipeline
+//! continues to exercise the API surface.
+
+#![allow(clippy::too_many_lines)]
 
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
+#[cfg(not(target_os = "macos"))]
+use squib_api::{ActionReceiver, ApiAction, ApiResponse};
 use squib_api::{
-    ActionReceiver, ApiAction, ApiResponse, ControllerSnapshot, RuntimeApiController, ServeOptions,
-    TimeoutTable, parse_config_file, replay_config, serve,
+    ControllerSnapshot, RuntimeApiController, ServeOptions, TimeoutTable, parse_config_file,
+    replay_config, serve,
 };
-use tracing::{error, info, warn};
+#[cfg(not(target_os = "macos"))]
+use tracing::error;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod cli;
+#[cfg(target_os = "macos")]
+mod vmm_loop;
+#[cfg(target_os = "macos")]
+mod vsock_muxer;
 
 use cli::{Args, LogLevel};
 
@@ -108,8 +119,25 @@ async fn main() -> Result<()> {
         RuntimeApiController::new(snapshot, TimeoutTable::from_spec(), VMM_CHANNEL_CAPACITY);
     let controller = Arc::new(controller);
 
-    // Spawn the stub VMM consumer. Track A's HVF backend replaces this with the real
-    // VMM event loop when Phase 1 lands.
+    // Spawn the VMM consumer. On macOS this is the real HVF-backed
+    // event loop; on other targets we keep the Phase-2 stub so the
+    // non-Apple-Silicon build compiles.
+    #[cfg(target_os = "macos")]
+    let stub_vmm = {
+        let run_budget = std::time::Duration::from_mins(5);
+        let loop_cfg = vmm_loop::VmmLoopConfig {
+            net_mode,
+            gvproxy_path: args.gvproxy_path.clone(),
+            bridged_iface: args.bridged_iface.clone(),
+            run_budget,
+            mmds_size_cap: args
+                .mmds_size_limit
+                .map_or(8192usize, |v| usize::try_from(v).unwrap_or(usize::MAX)),
+        };
+        let controller_for_loop = Arc::clone(&controller);
+        tokio::spawn(async move { vmm_loop::run(controller_for_loop, vmm_rx, loop_cfg).await })
+    };
+    #[cfg(not(target_os = "macos"))]
     let stub_vmm = tokio::spawn(stub_vmm_loop(vmm_rx));
 
     if let Some(config_path) = args.config_file.clone() {
@@ -163,11 +191,14 @@ async fn replay_static_config(
     Ok(())
 }
 
-/// Phase-2 stub VMM event loop. Acks every action with `204 No Content`, except for
-/// the actions that actually need a running VMM — those return a `BadRequest` with a
-/// stable `fault_message` so orchestrator integrations get a deterministic answer.
-///
-/// Phase 1 replaces this with the real event loop in `squib-vmm`.
+/// Phase-2 stub VMM event loop — retained for non-macOS targets so the
+/// cross-platform build continues to work; on macOS the real event
+/// loop in [`vmm_loop`] replaces it. Acks every action with
+/// `204 No Content`, except for the actions that actually need a
+/// running VMM — those return a `BadRequest` with a stable
+/// `fault_message` so orchestrator integrations get a deterministic
+/// answer on platforms where HVF isn't available.
+#[cfg(not(target_os = "macos"))]
 async fn stub_vmm_loop(mut rx: ActionReceiver) {
     while let Some((action, ack)) = rx.recv().await {
         let label = action.label();

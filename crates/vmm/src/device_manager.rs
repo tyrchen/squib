@@ -42,6 +42,7 @@ use squib_virtio::{
         console::{ConsoleDevice, ConsoleSink},
         net::{NetBackend, NetConfig, NetDevice},
         rng::{OsEntropy, RngDevice},
+        vsock::{VsockConfig as VirtioVsockConfig, VsockDevice, VsockMuxer},
     },
     interrupt::IrqLine,
     slot::{Slot, SlotAllocator},
@@ -93,6 +94,11 @@ pub struct DeviceLayout {
     /// MMDS interceptor; the API layer patches its data / token stores
     /// at runtime.
     pub mmds: MmdsInterceptor,
+    /// Handle on the vsock device (when the operator configured one) so
+    /// the async UDS muxer can kick `process_queue(RX_QUEUE)` when host
+    /// → guest packets land. `None` when `DeviceBuildArgs::vsock` was
+    /// absent.
+    pub vsock_device: Option<Arc<Mutex<VsockDevice>>>,
 }
 
 impl std::fmt::Debug for DeviceLayout {
@@ -100,6 +106,37 @@ impl std::fmt::Debug for DeviceLayout {
         f.debug_struct("DeviceLayout")
             .field("bus_devices", &self.bus.len())
             .field("virtio_slots", &self.virtio_slots.len())
+            .field("has_vsock", &self.vsock_device.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Operator input for the vsock device. Combines the validated API
+/// config with the host-side muxer implementation the VMM event loop
+/// owns.
+pub struct VsockSpec {
+    /// Operator-supplied identifier (`vsock_id`).
+    pub vsock_id: String,
+    /// Guest CID (>= 3).
+    pub guest_cid: u64,
+    /// Informational UDS base path — copied into the device config and
+    /// surfaced via `read_config`. The actual listeners bind inside
+    /// the muxer.
+    pub uds_path: String,
+    /// Whether TSI mode was requested.
+    pub tsi: bool,
+    /// Host-side multiplexer. For tok-dev this is the
+    /// `apps/squib/src/vsock_muxer::UdsVsockMuxer`.
+    pub muxer: Arc<dyn VsockMuxer>,
+}
+
+impl std::fmt::Debug for VsockSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VsockSpec")
+            .field("vsock_id", &self.vsock_id)
+            .field("guest_cid", &self.guest_cid)
+            .field("uds_path", &self.uds_path)
+            .field("tsi", &self.tsi)
             .finish_non_exhaustive()
     }
 }
@@ -119,6 +156,8 @@ pub struct DeviceBuildArgs {
     pub net: Option<NetSpec>,
     /// Whether to expose virtio-console as a secondary console.
     pub enable_console: bool,
+    /// Optional virtio-vsock spec. `None` ⇒ no vsock device.
+    pub vsock: Option<VsockSpec>,
 }
 
 /// virtio-net configuration plus the host-side backend choice.
@@ -158,6 +197,7 @@ impl std::fmt::Debug for DeviceBuildArgs {
             .field("block", &self.block.is_some())
             .field("net", &self.net.is_some())
             .field("enable_console", &self.enable_console)
+            .field("vsock", &self.vsock.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -311,10 +351,55 @@ pub fn build_device_layout(
         });
     }
 
+    // virtio-vsock — optional, but always last in the slot order so
+    // the lower slots match the fixed-in-FDT ordering of block/net/etc.
+    let vsock_device = if let Some(spec) = args.vsock {
+        let vsock_slot = alloc_or_fail(&mut allocator)?;
+        let vsock_config = VirtioVsockConfig {
+            vsock_id: spec.vsock_id,
+            guest_cid: spec.guest_cid,
+            uds_path: spec.uds_path,
+            tsi: spec.tsi,
+        };
+        let device = VsockDevice::new(vsock_config, spec.muxer)?;
+        let device_arc: Arc<Mutex<VsockDevice>> = Arc::new(Mutex::new(device));
+        // Plug the same mutex-wrapped device onto the bus under the
+        // dynamically-typed `BusDevice` trait; the transport owns the
+        // long-term handle, we keep our concrete clone for the async
+        // RX pump.
+        let bus_device: Arc<Mutex<dyn VirtioDevice>> = {
+            let typed = Arc::clone(&device_arc);
+            // Re-cast via Arc::from(dyn)... parking_lot Mutex lets us
+            // do this only if Mutex<T>: Sized, which is true for
+            // VsockDevice. We build a trait-object Mutex by
+            // construction: wrap with Arc<Mutex<dyn>> directly using a
+            // double-Arc would be wasteful, so we expose the handle
+            // through a second Arc that points at the same Mutex via
+            // `Arc::clone` + trait coercion.
+            let as_dyn: Arc<Mutex<dyn VirtioDevice>> = typed;
+            as_dyn
+        };
+        let irq = IrqLine::new(Arc::clone(&gic), vsock_slot.intid);
+        let transport = VirtioMmioTransport::new(bus_device, Arc::clone(&mem), irq);
+        let transport_arc: Arc<Mutex<dyn BusDevice>> = Arc::new(Mutex::new(transport));
+        builder.insert(
+            transport_arc,
+            vsock_slot.base,
+            squib_virtio::VIRTIO_MMIO_REGION_BYTES,
+        )?;
+        slots.push(VirtioSlot {
+            slot: vsock_slot.index,
+        });
+        Some(device_arc)
+    } else {
+        None
+    };
+
     Ok(DeviceLayout {
         bus: builder.build(),
         virtio_slots: slots,
         mmds,
+        vsock_device,
     })
 }
 
@@ -413,6 +498,7 @@ mod tests {
                 block: None,
                 net: None,
                 enable_console: false,
+                vsock: None,
             },
         )
         .unwrap();
@@ -443,6 +529,7 @@ mod tests {
                 }),
                 net: Some(NetSpec::loopback("eth0", "tap0").unwrap()),
                 enable_console: false,
+                vsock: None,
             },
         )
         .unwrap();
@@ -475,6 +562,7 @@ mod tests {
                 block: None,
                 net: Some(NetSpec::loopback("eth0", "tap0").unwrap()),
                 enable_console: false,
+                vsock: None,
             },
         )
         .unwrap();

@@ -325,6 +325,14 @@ impl MacAddr {
         Self { bytes }
     }
 
+    /// Borrow the underlying 6-byte representation. The VMM consumes this
+    /// to seed the virtio-net `guest_mac`; upstream keeps the getter narrow
+    /// so the raw bytes don't leak into arbitrary code.
+    #[must_use]
+    pub const fn bytes(&self) -> [u8; 6] {
+        self.bytes
+    }
+
     /// The wire-shape `aa:bb:cc:dd:ee:ff` representation.
     #[must_use]
     pub fn to_canonical_string(self) -> String {

@@ -144,6 +144,7 @@ fn test_reference_vm_boots_linux_and_curls_mmds() {
             block: None,
             net: Some(NetSpec::loopback("eth0", "tap0").unwrap()),
             enable_console: false,
+            vsock: None,
         },
     )
     .expect("device layout");

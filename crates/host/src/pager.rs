@@ -536,7 +536,7 @@ mod mach_imp {
             .spawn(move || -> Result<(), PagerError> {
                 #[cfg(feature = "pager-live-mach")]
                 {
-                    return live::run_live_server(&handle);
+                    live::run_live_server(&handle)
                 }
                 #[cfg(not(feature = "pager-live-mach"))]
                 {
@@ -647,11 +647,11 @@ mod mach_imp {
                         // reply with KERN_SUCCESS.
                         debug!("squib-pager live: received exception (no-reply forwarder)");
                     }
-                    rc if rc == MACH_RCV_TIMEOUT as i32 => {
+                    rc if rc == MACH_RCV_TIMEOUT => {
                         // Expected — every `poll_interval` we wake to
                         // drift-check + check shutdown.
                     }
-                    rc if rc == MACH_RCV_TOO_LARGE as i32 => {
+                    rc if rc == MACH_RCV_TOO_LARGE => {
                         warn!("squib-pager live: oversize exception message dropped");
                     }
                     rc => {
@@ -686,8 +686,9 @@ mod mach_imp {
             let mut port: mach_port_t = 0;
             // SAFETY: `mach_port_allocate` writes `port` only when it returns
             // KERN_SUCCESS; we own the allocated port until `mach_port_deallocate`.
-            let kr =
-                unsafe { mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mut port) };
+            let kr = unsafe {
+                mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &raw mut port)
+            };
             if kr == KERN_SUCCESS {
                 Ok(port)
             } else {
@@ -711,10 +712,10 @@ mod mach_imp {
                     mach_task_self(),
                     SQUIB_EXC_MASK,
                     port,
-                    EXCEPTION_DEFAULT as i32,
+                    EXCEPTION_DEFAULT.cast_signed(),
                     THREAD_STATE_NONE,
                     masks.as_mut_ptr() as exception_mask_array_t,
-                    &mut count,
+                    &raw mut count,
                     handlers.as_mut_ptr() as exception_handler_array_t,
                     behaviors.as_mut_ptr() as exception_behavior_array_t,
                     flavors.as_mut_ptr() as exception_flavor_array_t,
@@ -740,7 +741,7 @@ mod mach_imp {
                     mach_task_self(),
                     SQUIB_EXC_MASK,
                     masks.as_mut_ptr() as exception_mask_array_t,
-                    &mut count,
+                    &raw mut count,
                     handlers.as_mut_ptr() as exception_handler_array_t,
                     behaviors.as_mut_ptr() as exception_behavior_array_t,
                     flavors.as_mut_ptr() as exception_flavor_array_t,
@@ -782,8 +783,8 @@ mod mach_imp {
             // surface as MACH_RCV_TOO_LARGE, which we handle as a warn-and-skip.
             unsafe {
                 mach_msg(
-                    &mut header as *mut _ as *mut _,
-                    option as i32,
+                    (&raw mut header).cast(),
+                    option,
                     0,
                     size_of::<mach_msg_header_t>() as u32,
                     port,

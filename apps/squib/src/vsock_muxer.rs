@@ -110,12 +110,12 @@ struct Connection {
     /// `buf_alloc > 0` races the `Shutdown` handler which removes the
     /// entry before the poller wakes up.
     response_signal: Option<oneshot::Sender<()>>,
-    /// Last-known credit snapshot from the guest. Unused in the
-    /// simple-credit regime but captured so the logging side can
-    /// surface per-connection flow-control info.
-    #[allow(dead_code)]
+    /// Last-known credit snapshot from the guest. Drives host→guest
+    /// flow control: the reader task blocks when `host_forwarded -
+    /// guest_fwd_cnt >= guest_buf_alloc` and wakes on
+    /// [`Self::credit_notify`] when the guest sends a `CreditUpdate`
+    /// or `Rw` packet (which carries a refreshed `fwd_cnt`).
     guest_buf_alloc: u32,
-    #[allow(dead_code)]
     guest_fwd_cnt: u32,
     /// Number of payload bytes we've forwarded **to the guest** via
     /// `Rw` packets. Drives the `fwd_cnt` field on host→guest packets
@@ -126,6 +126,10 @@ struct Connection {
     /// `CreditUpdate` packets. Separate counter so guest→host and
     /// host→guest streams advance independently.
     guest_rx_forwarded: u32,
+    /// Fired from `handle_tx` whenever the guest sends a packet that
+    /// refreshes the credit window (`Response`, `Rw`, `CreditUpdate`),
+    /// so the reader task waiting for credit can wake up immediately.
+    credit_notify: Arc<Notify>,
     /// Marks the connection as closed; both halves stop pushing new
     /// packets once set.
     closed: bool,
@@ -322,19 +326,27 @@ impl VsockMuxer for UdsVsockMuxer {
                 // waiting for the ACK and writes `OK <host_port>\n`
                 // back to the UDS client. Event-driven so we don't
                 // race a short-lived guest that replies + shuts down
-                // inside a single tokio tick.
-                let signal = {
+                // inside a single tokio tick. Also seeds the initial
+                // credit window from the guest's advertised `buf_alloc`
+                // so the reader task can start pushing payload bytes.
+                let (signal, credit) = {
                     let mut conns = self.state.connections.lock();
                     if let Some(conn) = conns.get_mut(&key) {
                         conn.guest_buf_alloc = pkt.hdr.buf_alloc;
                         conn.guest_fwd_cnt = pkt.hdr.fwd_cnt;
-                        conn.response_signal.take()
+                        (
+                            conn.response_signal.take(),
+                            Some(Arc::clone(&conn.credit_notify)),
+                        )
                     } else {
-                        None
+                        (None, None)
                     }
                 };
                 if let Some(tx) = signal {
                     let _ = tx.send(());
+                }
+                if let Some(n) = credit {
+                    n.notify_waiters();
                 }
                 Vec::new()
             }
@@ -349,10 +361,13 @@ impl VsockMuxer for UdsVsockMuxer {
                 // packet's length. We keep that counter on the
                 // per-connection record (`guest_rx_forwarded`) and
                 // advertise its monotonic snapshot on every credit
-                // packet.
+                // packet. Every guest packet also refreshes our
+                // snapshot of the guest's receive-side credit window
+                // (`guest_buf_alloc`, `guest_fwd_cnt`) so the reader
+                // task can make progress.
                 let payload_len = u32::try_from(pkt.payload.len()).unwrap_or(u32::MAX);
                 let mut conns = self.state.connections.lock();
-                let fwd_cnt_snapshot = if let Some(conn) = conns.get_mut(&key) {
+                let (fwd_cnt_snapshot, credit_notify) = if let Some(conn) = conns.get_mut(&key) {
                     if conn.closed {
                         return Vec::new();
                     }
@@ -360,9 +375,14 @@ impl VsockMuxer for UdsVsockMuxer {
                         conn.closed = true;
                     }
                     conn.guest_rx_forwarded = conn.guest_rx_forwarded.saturating_add(payload_len);
-                    Some(conn.guest_rx_forwarded)
+                    conn.guest_buf_alloc = pkt.hdr.buf_alloc;
+                    conn.guest_fwd_cnt = pkt.hdr.fwd_cnt;
+                    (
+                        Some(conn.guest_rx_forwarded),
+                        Some(Arc::clone(&conn.credit_notify)),
+                    )
                 } else {
-                    None
+                    (None, None)
                 };
                 drop(conns);
                 if let Some(fwd_cnt) = fwd_cnt_snapshot {
@@ -383,6 +403,9 @@ impl VsockMuxer for UdsVsockMuxer {
                     };
                     self.state.push_rx(credit);
                 }
+                if let Some(n) = credit_notify {
+                    n.notify_waiters();
+                }
                 Vec::new()
             }
             VsockOp::Shutdown | VsockOp::Rst => {
@@ -397,15 +420,28 @@ impl VsockMuxer for UdsVsockMuxer {
                 Vec::new()
             }
             VsockOp::CreditUpdate | VsockOp::CreditRequest => {
-                // Read-only credit updates from the guest: stash on
-                // the per-connection struct. The simple regime ignores
-                // guest credit; we just advertise max.
-                let mut conns = self.state.connections.lock();
-                if let Some(conn) = conns.get_mut(&key) {
-                    conn.guest_buf_alloc = pkt.hdr.buf_alloc;
-                    conn.guest_fwd_cnt = pkt.hdr.fwd_cnt;
-                }
-                if matches!(pkt.hdr.op, VsockOp::CreditRequest) {
+                // Read-only credit updates from the guest: refresh the
+                // per-connection credit snapshot and wake the reader
+                // task so it can drain UDS bytes against the new
+                // window. On a CreditRequest we reply with our current
+                // `fwd_cnt` so the guest can recompute its send-side
+                // credit.
+                let (fwd_cnt_snapshot, credit_notify) = {
+                    let mut conns = self.state.connections.lock();
+                    if let Some(conn) = conns.get_mut(&key) {
+                        conn.guest_buf_alloc = pkt.hdr.buf_alloc;
+                        conn.guest_fwd_cnt = pkt.hdr.fwd_cnt;
+                        (
+                            Some(conn.guest_rx_forwarded),
+                            Some(Arc::clone(&conn.credit_notify)),
+                        )
+                    } else {
+                        (None, None)
+                    }
+                };
+                if matches!(pkt.hdr.op, VsockOp::CreditRequest)
+                    && let Some(fwd_cnt) = fwd_cnt_snapshot
+                {
                     let credit = VsockPacket {
                         hdr: VsockHeader {
                             src_cid: VMADDR_CID_HOST,
@@ -417,11 +453,14 @@ impl VsockMuxer for UdsVsockMuxer {
                             op: VsockOp::CreditUpdate,
                             flags: 0,
                             buf_alloc: DEFAULT_BUF_ALLOC,
-                            fwd_cnt: 0,
+                            fwd_cnt,
                         },
                         payload: Vec::new(),
                     };
                     self.state.push_rx(credit);
+                }
+                if let Some(n) = credit_notify {
+                    n.notify_waiters();
                 }
                 Vec::new()
             }
@@ -510,6 +549,7 @@ async fn handle_host_connection(
     // doesn't race the listener's poll.
     let (guest_to_host_tx, mut guest_to_host_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (response_tx, response_rx) = oneshot::channel::<()>();
+    let credit_notify = Arc::new(Notify::new());
     state.connections.lock().insert(
         key,
         Connection {
@@ -519,6 +559,7 @@ async fn handle_host_connection(
             guest_fwd_cnt: 0,
             host_forwarded: 0,
             guest_rx_forwarded: 0,
+            credit_notify: Arc::clone(&credit_notify),
             closed: false,
         },
     );
@@ -569,12 +610,69 @@ async fn handle_host_connection(
     // Split the UDS for bidirectional byte streaming.
     let (mut read_half, mut write_half) = stream.into_split();
 
-    // Reader: host UDS → guest (RW packets).
+    // Reader: host UDS → guest (RW packets). Respects the guest's
+    // advertised credit window (`buf_alloc - (host_forwarded -
+    // guest_fwd_cnt)`) and waits on `credit_notify` whenever the
+    // window closes. Without this throttle, Linux's vsock driver
+    // discards packets silently once its socket `sk_rcvbuf` fills
+    // up — observed as a stage-and-call that stalls at ~75 % of a
+    // multi-MiB payload.
     let state_reader = Arc::clone(&state);
     let reader = tokio::spawn(async move {
         let mut buf = vec![0u8; RW_CHUNK_BYTES];
         loop {
-            let n = match read_half.read(&mut buf).await {
+            // Wait for credit before reading from the UDS. Reading and
+            // then blocking on credit would strand bytes in a local
+            // Vec — doing it UDS-side preserves the kernel's natural
+            // flow control to the host client. Register the notified
+            // future *before* re-reading credit so we don't lose
+            // wakeups that fire between the credit check and the
+            // await (Notify::notify_waiters() is lost if no waiter is
+            // registered at the time of the call).
+            loop {
+                let notify = {
+                    let conns = state_reader.connections.lock();
+                    match conns.get(&key) {
+                        Some(conn) if !conn.closed => Arc::clone(&conn.credit_notify),
+                        _ => return,
+                    }
+                };
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                // Second check after the registration so a wake posted
+                // between the first read and `notified.enable()` is
+                // observed immediately.
+                let credit_bytes = {
+                    let conns = state_reader.connections.lock();
+                    match conns.get(&key) {
+                        Some(conn) if !conn.closed => {
+                            let outstanding = conn.host_forwarded.wrapping_sub(conn.guest_fwd_cnt);
+                            conn.guest_buf_alloc.saturating_sub(outstanding)
+                        }
+                        _ => return,
+                    }
+                };
+                if credit_bytes > 0 {
+                    break;
+                }
+                notified.as_mut().await;
+            }
+            // Clamp the UDS read to at most the current credit window
+            // AND the fixed chunk size so a single RW packet never
+            // exceeds either. We read `buf[..chunk]` rather than the
+            // full vec so credit bookkeeping stays accurate.
+            let window = {
+                let conns = state_reader.connections.lock();
+                match conns.get(&key) {
+                    Some(conn) if !conn.closed => {
+                        let outstanding = conn.host_forwarded.wrapping_sub(conn.guest_fwd_cnt);
+                        conn.guest_buf_alloc.saturating_sub(outstanding)
+                    }
+                    _ => return,
+                }
+            };
+            let chunk = RW_CHUNK_BYTES.min(window as usize).max(1);
+            let n = match read_half.read(&mut buf[..chunk]).await {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(err) => {
@@ -583,12 +681,21 @@ async fn handle_host_connection(
                 }
             };
             let payload = buf[..n].to_vec();
+            // vsock protocol §5.10.6.3: `fwd_cnt` in an outgoing packet is
+            // the **sender's** running count of bytes it has consumed
+            // from its RX buffer — i.e., bytes the host has delivered to
+            // the UDS client (guest → host direction). Advertising
+            // `host_forwarded` (bytes host has pushed to guest) instead
+            // causes Linux's vsock driver to compute a nonsensical
+            // peer-credit snapshot and stall the guest's userspace
+            // reader. Track the counter for observability but advertise
+            // `guest_rx_forwarded` on the wire.
             let (buf_alloc, fwd_cnt) = {
                 let mut conns = state_reader.connections.lock();
                 match conns.get_mut(&key) {
                     Some(conn) if !conn.closed => {
                         conn.host_forwarded = conn.host_forwarded.saturating_add(n as u32);
-                        (DEFAULT_BUF_ALLOC, conn.host_forwarded)
+                        (DEFAULT_BUF_ALLOC, conn.guest_rx_forwarded)
                     }
                     _ => return,
                 }
@@ -611,7 +718,14 @@ async fn handle_host_connection(
             state_reader.push_rx(rw);
         }
 
-        // Host closed the UDS: tell the guest we're done.
+        // Host closed the UDS: tell the guest we're done. Use the
+        // connection's final guest→host byte counter on the shutdown
+        // packet so the guest's credit state stays consistent.
+        let shutdown_fwd_cnt = state_reader
+            .connections
+            .lock()
+            .get(&key)
+            .map_or(0, |c| c.guest_rx_forwarded);
         let shutdown = VsockPacket {
             hdr: VsockHeader {
                 src_cid: VMADDR_CID_HOST,
@@ -622,8 +736,8 @@ async fn handle_host_connection(
                 type_: TYPE_STREAM,
                 op: VsockOp::Shutdown,
                 flags: 0x3, // bit0=send, bit1=recv
-                buf_alloc: 0,
-                fwd_cnt: 0,
+                buf_alloc: DEFAULT_BUF_ALLOC,
+                fwd_cnt: shutdown_fwd_cnt,
             },
             payload: Vec::new(),
         };

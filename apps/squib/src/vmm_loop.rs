@@ -322,12 +322,21 @@ fn start_microvm(state: &mut BootState, cfg: &VmmLoopConfig) -> Result<RunningVm
     // inbound packets.
     let mut notify_handle: Option<NotifyHandle> = None;
     let vsock_spec = if let Some(v) = state.vsock.as_ref() {
-        // The muxer needs the exact ports tok-initd listens on
-        // (`crates/tok-initd/src/lib.rs`): 5001 exec, 5002 obs, 5003
-        // stage, 5004 health. Listing them explicitly keeps the hot
-        // path cheap (no per-port lookup) and the integration
-        // surface narrow.
-        let host_ports = vec![5001, 5002, 5003, 5004];
+        // The muxer binds UDS listeners on the ports tok-initd listens
+        // on from inside the guest (`tok-initd/src/lib.rs`):
+        //   5000  VSOCK_PORT         (warm-path execute)
+        //   5001  VSOCK_HEALTH_PORT  (readiness probe)
+        //   5003  VSOCK_STAGE_PORT   (cold-path stage-and-invoke)
+        //
+        // Port 5002 (VSOCK_OBS_PORT) is *guest-initiated* — the guest
+        // dials the host on CID 2, port 5002. The muxer's `handle_tx`
+        // accepts those and forwards them out of a host UDS; no bind()
+        // is needed for the guest-initiated direction.
+        //
+        // Note: upstream vsock does not scope listeners per dst_cid,
+        // so an extra host-initiated port is harmless — but binding a
+        // UDS for a port no one listens on just wastes an inode.
+        let host_ports = vec![5000, 5001, 5003];
         let muxer = UdsVsockMuxer::spawn(UdsVsockMuxerParams {
             uds_base: v.uds_path.as_path().to_path_buf(),
             guest_cid: u64::from(v.guest_cid),
@@ -499,6 +508,13 @@ fn build_vmnet_backend(
 /// Background task: wake on every muxer notify, call the vsock
 /// device's `process_queue(RX_QUEUE)`. Exits when the shutdown flag
 /// flips.
+///
+/// The pump uses a short polling fallback (20 ms) because
+/// `tokio::sync::Notify` is single-slot — a `notify_one()` call that
+/// arrives between a waiter's `.notified()` registration and the next
+/// scheduler poll would otherwise be lost. The fallback caps host→
+/// guest queue latency at 20 ms on the pessimistic path; the notify
+/// wake dominates on the happy path.
 async fn vsock_rx_pump(
     notify: NotifyHandle,
     device: Arc<Mutex<squib_virtio::devices::vsock::VsockDevice>>,
@@ -506,17 +522,23 @@ async fn vsock_rx_pump(
 ) {
     use squib_virtio::VirtioDevice;
     const RX_QUEUE: u16 = 0;
+    let mut activated_once = false;
     while !shutdown.load(Ordering::SeqCst) {
-        // Wake on either a notify or a short polling tick. The tick
-        // is there so a race between notify and `notified().await`
-        // registration doesn't stall packets (Notify is single-slot).
         tokio::select! {
             () = notify.notified() => {}
             () = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
-        {
+        let activated = {
             let mut guard = device.lock();
-            guard.process_queue(RX_QUEUE);
+            let was_activated = guard.is_activated();
+            if was_activated {
+                guard.process_queue(RX_QUEUE);
+            }
+            was_activated
+        };
+        if activated && !activated_once {
+            activated_once = true;
+            info!("vsock rx pump: device activated, pumping RX");
         }
     }
 }

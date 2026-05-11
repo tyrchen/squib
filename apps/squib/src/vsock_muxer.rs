@@ -68,7 +68,7 @@ use squib_virtio::devices::vsock::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    sync::{Notify, mpsc},
+    sync::{Notify, mpsc, oneshot},
 };
 
 /// Default per-direction credit advertised to the guest (and back). 1
@@ -98,6 +98,18 @@ struct Connection {
     /// land as payload bytes on this channel, drained by the async
     /// writer task.
     guest_to_host_tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// One-shot notification fired exactly once when the guest sends
+    /// the `Response` packet establishing this stream. The
+    /// `handle_host_connection` task awaits this before sending the
+    /// `OK <host_port>\n` line back to the UDS client.
+    ///
+    /// Event-driven so we don't miss the signal when the guest's
+    /// entire response (Response + Rw + Shutdown) completes inside a
+    /// single tokio tick — which is the normal case for short-lived
+    /// requests like the readiness probe. Polling a map entry for
+    /// `buf_alloc > 0` races the `Shutdown` handler which removes the
+    /// entry before the poller wakes up.
+    response_signal: Option<oneshot::Sender<()>>,
     /// Last-known credit snapshot from the guest. Unused in the
     /// simple-credit regime but captured so the logging side can
     /// surface per-connection flow-control info.
@@ -153,6 +165,13 @@ struct SharedState {
 
 impl SharedState {
     fn push_rx(&self, pkt: VsockPacket) {
+        tracing::trace!(
+            op = ?pkt.hdr.op,
+            src_port = pkt.hdr.src_port,
+            dst_port = pkt.hdr.dst_port,
+            payload_len = pkt.payload.len(),
+            "vsock muxer: push_rx (host->guest)"
+        );
         self.rx_queue.lock().push(pkt);
         self.rx_notify.notify_one();
     }
@@ -258,6 +277,17 @@ impl VsockMuxer for UdsVsockMuxer {
         // guest-initiated connections with `Rst` for now).
         let guest_src_port = pkt.hdr.src_port;
         let guest_dst_port = pkt.hdr.dst_port;
+        tracing::trace!(
+            op = ?pkt.hdr.op,
+            src_cid = pkt.hdr.src_cid,
+            dst_cid = pkt.hdr.dst_cid,
+            src_port = guest_src_port,
+            dst_port = guest_dst_port,
+            buf_alloc = pkt.hdr.buf_alloc,
+            fwd_cnt = pkt.hdr.fwd_cnt,
+            payload_len = pkt.payload.len(),
+            "vsock muxer: guest TX"
+        );
         let key = ConnectionKey {
             host_port: guest_dst_port,
             guest_port: guest_src_port,
@@ -287,18 +317,25 @@ impl VsockMuxer for UdsVsockMuxer {
                 vec![rst]
             }
             VsockOp::Response => {
-                // Guest accepted a host-initiated Request. Unblock the
-                // host listener task that's waiting for the ACK; from
-                // here bytes flow both ways.
-                let mut conns = self.state.connections.lock();
-                if let Some(conn) = conns.get_mut(&key) {
-                    conn.guest_buf_alloc = pkt.hdr.buf_alloc;
-                    conn.guest_fwd_cnt = pkt.hdr.fwd_cnt;
+                // Guest accepted a host-initiated Request. Fire the
+                // per-connection oneshot so the listener task stops
+                // waiting for the ACK and writes `OK <host_port>\n`
+                // back to the UDS client. Event-driven so we don't
+                // race a short-lived guest that replies + shuts down
+                // inside a single tokio tick.
+                let signal = {
+                    let mut conns = self.state.connections.lock();
+                    if let Some(conn) = conns.get_mut(&key) {
+                        conn.guest_buf_alloc = pkt.hdr.buf_alloc;
+                        conn.guest_fwd_cnt = pkt.hdr.fwd_cnt;
+                        conn.response_signal.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(tx) = signal {
+                    let _ = tx.send(());
                 }
-                // The listener task is watching the connections map;
-                // drop the lock and notify it through the shared rx
-                // path (it also uses `rx_notify` as a generic wake).
-                self.state.rx_notify.notify_waiters();
                 Vec::new()
             }
             VsockOp::Rw => {
@@ -349,14 +386,14 @@ impl VsockMuxer for UdsVsockMuxer {
                 Vec::new()
             }
             VsockOp::Shutdown | VsockOp::Rst => {
-                let mut conns = self.state.connections.lock();
-                if let Some(conn) = conns.get_mut(&key) {
-                    conn.closed = true;
-                    // Drop the writer channel — the listener task's
-                    // async writer sees the close and exits.
-                    drop(conn.guest_to_host_tx.clone());
-                }
-                conns.remove(&key);
+                // Remove and drop the connection; dropping the
+                // `guest_to_host_tx` inside `Connection` closes the
+                // mpsc channel so the writer task sees EOF and
+                // exits cleanly. If the oneshot hasn't fired yet,
+                // dropping it closes the receive half too so the
+                // listener's await falls into the `Err` arm and
+                // responds with `RST`.
+                let _ = self.state.connections.lock().remove(&key);
                 Vec::new()
             }
             VsockOp::CreditUpdate | VsockOp::CreditRequest => {
@@ -393,7 +430,11 @@ impl VsockMuxer for UdsVsockMuxer {
     }
 
     fn drain_rx(&self) -> Vec<VsockPacket> {
-        std::mem::take(&mut *self.state.rx_queue.lock())
+        let pkts = std::mem::take(&mut *self.state.rx_queue.lock());
+        if !pkts.is_empty() {
+            tracing::trace!(count = pkts.len(), "vsock muxer: drain_rx");
+        }
+        pkts
     }
 }
 
@@ -460,14 +501,20 @@ async fn handle_host_connection(
         guest_port,
     };
 
-    // Create the per-connection byte channel. The handle_tx side
-    // pushes guest-originated payloads onto this; the writer half
-    // forwards them to the UDS stream.
+    // Create the per-connection byte channel and the response
+    // oneshot. The handle_tx side pushes guest-originated payloads
+    // onto `guest_to_host_tx`; the writer half forwards them to the
+    // UDS stream. `response_rx` fires when the guest accepts the
+    // connection with a `Response` packet — event-driven so a short-
+    // lived guest (Response + Rw + Shutdown in one tokio tick)
+    // doesn't race the listener's poll.
     let (guest_to_host_tx, mut guest_to_host_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (response_tx, response_rx) = oneshot::channel::<()>();
     state.connections.lock().insert(
         key,
         Connection {
             guest_to_host_tx,
+            response_signal: Some(response_tx),
             guest_buf_alloc: 0,
             guest_fwd_cnt: 0,
             host_forwarded: 0,
@@ -494,26 +541,19 @@ async fn handle_host_connection(
     };
     state.push_rx(req);
 
-    // Wait up to ~5 s for the guest's `Response`. In practice we see
-    // this land within a few ms after the guest kernel finishes
-    // `listen()`. While we wait we also have to keep the UDS stream
-    // from buffering bytes — but tok's clients send CONNECT and wait
-    // for OK before sending any payload, so a blocking wait here is
-    // fine and matches upstream behaviour.
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-    let mut responded = false;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        if let Some(conn) = state.connections.lock().get(&key)
-            && conn.guest_buf_alloc > 0
-        {
-            responded = true;
-            break;
-        }
-    }
-
-    if !responded {
-        // Guest never responded; tell the client, then close.
+    // Await the guest's `Response` (via the oneshot fired from
+    // `handle_tx`'s Response arm) with a 5-second ceiling. We can be
+    // generous with the timeout because the happy path is sub-
+    // millisecond on HVF and a missing response always means the
+    // guest kernel either rejected (Rst) or the port has no listener.
+    let ack_deadline = tokio::time::Duration::from_secs(5);
+    // Either the timeout expired or the oneshot was dropped
+    // (connection removed by a Shutdown/Rst handler before the guest
+    // responded). Tell the client and clean up.
+    if !matches!(
+        tokio::time::timeout(ack_deadline, response_rx).await,
+        Ok(Ok(()))
+    ) {
         let _ = stream
             .write_all(format!("RST {guest_port}\n").as_bytes())
             .await;

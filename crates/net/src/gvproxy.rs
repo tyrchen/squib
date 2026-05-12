@@ -221,16 +221,22 @@ impl Drop for GvproxyBackend {
         if let Some(mut child) = self.child.lock().take() {
             // I-NET-5: gvproxy child is reaped on every shutdown path. The
             // tokio `Child` was constructed with `kill_on_drop(true)`, which
-            // wires SIGKILL into the `Child::Drop` path. We additionally
-            // call `start_kill` here so a panic during teardown still
-            // signals the child synchronously. Both calls are non-blocking;
-            // we deliberately do **not** spin on `try_wait` here because
-            // [`Drop`] may execute on a tokio worker thread (deadlock risk),
-            // and the OS reaps zombies via the pidfd `kill_on_drop` machinery
-            // independent of our wait.
+            // queues a SIGKILL through tokio's reaping machinery on the
+            // `Child::Drop` that fires below. On its own that's *not*
+            // enough when the tokio runtime is being torn down in parallel
+            // — the runtime's signal-delivery task can die before the
+            // reap call runs, leaving gvproxy orphaned. Send an explicit
+            // SIGKILL via `kill(2)` first so the signal lands on the
+            // kernel side immediately, independent of tokio state. Both
+            // calls are non-blocking; we deliberately do not spin on
+            // `try_wait` here because `Drop` may execute on a tokio
+            // worker thread and a blocking wait risks deadlock.
+            if let Some(pid) = child.id() {
+                crate::sys::kill_pid(pid, libc::SIGKILL);
+            }
+            // Belt and braces: also arm tokio's reaping path so the
+            // zombie gets collected even if the runtime is still alive.
             let _ = child.start_kill();
-            // Drop `child` here, which queues SIGKILL through tokio's
-            // reaping machinery.
             drop(child);
         }
     }

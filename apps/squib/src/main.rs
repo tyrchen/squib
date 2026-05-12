@@ -18,10 +18,10 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Result;
 use clap::Parser;
 #[cfg(not(target_os = "macos"))]
-use squib_api::{ActionReceiver, ApiAction, ApiResponse};
+use squib_api::{ActionReceiver, ApiResponse};
 use squib_api::{
-    ControllerSnapshot, RuntimeApiController, ServeOptions, TimeoutTable, parse_config_file,
-    replay_config, serve,
+    ApiAction, ControllerSnapshot, RuntimeApiController, ServeOptions, TimeoutTable,
+    parse_config_file, replay_config, serve,
 };
 #[cfg(not(target_os = "macos"))]
 use tracing::error;
@@ -150,9 +150,14 @@ async fn main() -> Result<()> {
             "squib running without API socket (--no-api). The static config has been replayed.",
         );
         // With --no-api there is no axum server to keep alive; let the stub VMM run
-        // until SIGINT (Ctrl-C). We rely on tokio's signal handler.
-        tokio::signal::ctrl_c().await.ok();
-        info!("SIGINT received; shutting down");
+        // until SIGINT or SIGTERM. Either should unwind the VMM loop cleanly so
+        // `GvproxyBackend::Drop` can reap its gvproxy sibling.
+        wait_for_termination_signal().await;
+        info!("termination signal received; draining VMM and shutting down");
+        let _ = controller
+            .action_sender()
+            .send((ApiAction::Shutdown, tokio::sync::oneshot::channel().0))
+            .await;
         let _ = stub_vmm.await;
         return Ok(());
     }
@@ -172,9 +177,55 @@ async fn main() -> Result<()> {
         "squib API server starting (HVF backend wiring is pending — Track A)",
     );
 
-    serve(opts, controller).await?;
+    // Race the API server against SIGTERM/SIGINT. On either signal we
+    // push `ApiAction::Shutdown` through the controller so the VMM
+    // loop unwinds its `RunningVm` cleanly — which triggers
+    // `NetHostBackend::Drop` and reaps the gvproxy sibling. Without
+    // this, a SIGTERM from tok-node's teardown would tear squib down
+    // before any `Drop` runs and orphan gvproxy
+    // (docs/learnings/real-world-test-findings.md §P3).
+    let action_sender = controller.action_sender();
+    tokio::select! {
+        r = serve(opts, controller) => {
+            r?;
+        }
+        () = wait_for_termination_signal() => {
+            info!("termination signal received; draining VMM and shutting down");
+            let _ = action_sender
+                .send((ApiAction::Shutdown, tokio::sync::oneshot::channel().0))
+                .await;
+        }
+    }
     let _ = stub_vmm.await;
     Ok(())
+}
+
+/// Resolve on the first of SIGINT (Ctrl-C) or SIGTERM (parent-process
+/// kill signal). Either should unwind the VMM loop, not terminate the
+/// process abruptly, so Drop chains run.
+async fn wait_for_termination_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        // If SIGTERM registration fails (extremely unlikely on Unix),
+        // fall back to SIGINT only — correctness over completeness.
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+            tokio::signal::ctrl_c().await.ok();
+            return;
+        };
+        let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
+            let _ = sigterm.recv().await;
+            return;
+        };
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }
 
 async fn replay_static_config(

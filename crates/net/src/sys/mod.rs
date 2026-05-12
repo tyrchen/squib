@@ -46,6 +46,29 @@ pub mod vmnet;
 #[cfg(target_os = "macos")]
 pub mod xpc;
 
+/// Direct `kill(2)` that bypasses the tokio runtime. Used by
+/// `GvproxyBackend::Drop` so a parent-process teardown delivers
+/// SIGKILL to gvproxy synchronously even if the tokio runtime is
+/// tearing down alongside (which makes `Child::start_kill` racy).
+///
+/// Returns `true` if `kill(2)` returned `0` (signal queued). No-op on
+/// `pid <= 0` so the caller doesn't have to special-case an already-
+/// reaped child.
+pub fn kill_pid(pid: u32, signum: i32) -> bool {
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid_i32 <= 0 {
+        return false;
+    }
+    // SAFETY: `libc::kill` is async-signal-safe (POSIX.1-2008 table §2.4),
+    // takes only integer arguments, and dereferences no memory on the caller
+    // side. A `pid` of `0`/`-1` is rejected above so we don't accidentally
+    // signal our own process group.
+    let rc = unsafe { libc::kill(pid_i32, signum) };
+    rc == 0
+}
+
 /// `vmnet_return_t` from `<vmnet/vmnet.h>`. Pinned as a `u32` to match the
 /// Darwin ABI; values are stable across macOS versions.
 #[repr(u32)]

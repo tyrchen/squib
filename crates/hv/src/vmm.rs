@@ -26,6 +26,7 @@ use thiserror::Error;
 /// edge-triggered SPIs at low INTIDs (PL011=33, virtio slots start at 48), so
 /// the MSI window must sit *above* them. We park MSI at the top of the range —
 /// leaves the low ~900 INTIDs free for SPI use, which is plenty for a 1.0 VMM.
+#[cfg(target_os = "macos")]
 const MSI_INTID_RESERVE: u32 = 64;
 
 /// Errors that can surface during HVF VM initialisation.
@@ -170,6 +171,7 @@ pub struct MappedRegion {
     pub guest_base: u64,
     /// Size of the mapping in bytes.
     pub size: usize,
+    #[cfg(target_os = "macos")]
     slot_index: usize,
 }
 
@@ -200,6 +202,7 @@ unsafe impl Send for HvfGuestMemory {}
 unsafe impl Sync for HvfGuestMemory {}
 
 #[cfg(not(target_os = "macos"))]
+/// Unsupported host guest-memory placeholder.
 #[derive(Debug)]
 pub struct HvfGuestMemory;
 

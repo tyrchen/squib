@@ -10,13 +10,19 @@ use std::io;
 
 use crate::error::{JailerError, Result};
 
+#[cfg(target_os = "linux")]
+type ResourceKind = libc::__rlimit_resource_t;
+
+#[cfg(not(target_os = "linux"))]
+type ResourceKind = libc::c_int;
+
 /// One parsed `--resource-limit` entry, ready to be handed to `setrlimit(2)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ResourceLimit {
     /// Stable label for diagnostics (matches the upstream key string).
     pub(crate) key: &'static str,
     /// libc `RLIMIT_*` constant.
-    pub(crate) resource: libc::c_int,
+    pub(crate) resource: ResourceKind,
     /// `rlim_cur == rlim_max == value`.
     pub(crate) value: libc::rlim_t,
 }
@@ -33,7 +39,7 @@ impl ResourceLimit {
             .parse()
             .map_err(|_| JailerError::InvalidResourceLimit(spec.to_string()))?;
 
-        let (resource, key_label): (libc::c_int, &'static str) = match key {
+        let (resource, key_label): (ResourceKind, &'static str) = match key {
             "fsize" => (libc::RLIMIT_FSIZE, "fsize"),
             "no-file" => (libc::RLIMIT_NOFILE, "no-file"),
             other => return Err(JailerError::UnsupportedResource(other.to_string())),

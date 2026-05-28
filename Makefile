@@ -41,6 +41,9 @@ deny:
 doc:
 	@$(CARGO) doc --workspace --no-deps
 
+publish:
+	@./scripts/publish.sh
+
 run:
 	@$(CARGO) run --bin squib --
 

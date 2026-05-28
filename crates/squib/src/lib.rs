@@ -33,8 +33,9 @@ use squib_api::{
 use squib_net::NetMode;
 use thiserror::Error;
 use tokio::task::JoinHandle;
+use tracing::warn;
 #[cfg(not(target_os = "macos"))]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[cfg(target_os = "macos")]
 mod vmm_loop;
@@ -256,28 +257,45 @@ impl SquibBuilder {
             RuntimeApiController::new(snapshot, self.timeouts, self.channel_capacity);
         let controller = Arc::new(controller);
 
-        let vmm_task = spawn_vmm_loop(Arc::clone(&controller), vmm_rx, &self);
+        let mut vmm_task = Some(spawn_vmm_loop(Arc::clone(&controller), vmm_rx, &self));
+        let startup = async {
+            if let Some(config_path) = self.config_file.as_ref() {
+                let cfg = parse_config_file(config_path).await?;
+                replay_config(&controller, cfg, self.start_microvm).await?;
+            }
 
-        if let Some(config_path) = self.config_file.as_ref() {
-            let cfg = parse_config_file(config_path).await?;
-            replay_config(&controller, cfg, self.start_microvm).await?;
+            if let Some(socket_path) = self.api_socket.as_ref() {
+                let opts = ServeOptions::new(socket_path)
+                    .with_max_payload_size(self.http_api_max_payload_size);
+                let listener = bind_listener(&opts).await?;
+                let controller_for_server = Arc::clone(&controller);
+                Ok(Some(tokio::spawn(async move {
+                    serve_bound(listener, opts, controller_for_server).await
+                })))
+            } else {
+                Ok(None)
+            }
         }
+        .await;
 
-        let api_task = if let Some(socket_path) = self.api_socket.as_ref() {
-            let opts = ServeOptions::new(socket_path)
-                .with_max_payload_size(self.http_api_max_payload_size);
-            let listener = bind_listener(&opts).await?;
-            let controller_for_server = Arc::clone(&controller);
-            Some(tokio::spawn(async move {
-                serve_bound(listener, opts, controller_for_server).await
-            }))
-        } else {
-            None
+        let api_task = match startup {
+            Ok(task) => task,
+            Err(err) => {
+                if let Some(task) = vmm_task.take()
+                    && let Err(cleanup_err) = stop_vmm_task(&controller, task).await
+                {
+                    warn!(
+                        error = %cleanup_err,
+                        "failed to stop VMM task after facade startup failure"
+                    );
+                }
+                return Err(err);
+            }
         };
 
         Ok(Squib {
             controller,
-            vmm_task: Some(vmm_task),
+            vmm_task,
             api_task,
             shutdown_sent: false,
         })
@@ -350,29 +368,31 @@ impl Squib {
     /// `Internal` error caused by an already-closed VMM loop is treated as a completed
     /// shutdown so repeated calls remain idempotent.
     pub async fn shutdown(&mut self) -> Result<(), SquibError> {
-        if !self.shutdown_sent {
-            self.shutdown_sent = true;
-            match self.controller.dispatch(ApiAction::Shutdown).await {
-                Ok(_) => {}
-                Err(squib_api::ApiError::Internal(message))
-                    if message == "VMM event loop is gone" => {}
-                Err(err) => return Err(SquibError::from(err)),
-            }
-        }
-
-        if let Some(task) = self.api_task.take() {
-            task.abort();
-            match task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) if err.kind() == std::io::ErrorKind::Interrupted => {}
-                Ok(Err(err)) => return Err(SquibError::from(err)),
-                Err(err) if err.is_cancelled() => {}
-                Err(err) => return Err(SquibError::from(err)),
-            }
-        }
+        self.abort_api_server().await?;
 
         if let Some(task) = self.vmm_task.take() {
-            task.await?;
+            if self.shutdown_sent {
+                task.await?;
+            } else {
+                self.shutdown_sent = true;
+                stop_vmm_task(&self.controller, task).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn abort_api_server(&mut self) -> Result<(), SquibError> {
+        let Some(task) = self.api_task.take() else {
+            return Ok(());
+        };
+
+        task.abort();
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Ok(Err(err)) => return Err(SquibError::from(err)),
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => return Err(SquibError::from(err)),
         }
         Ok(())
     }
@@ -392,6 +412,28 @@ impl Drop for Squib {
             task.abort();
         }
     }
+}
+
+async fn stop_vmm_task(
+    controller: &RuntimeApiController,
+    task: JoinHandle<()>,
+) -> Result<(), SquibError> {
+    request_vmm_shutdown(controller).await;
+    task.await?;
+    Ok(())
+}
+
+async fn request_vmm_shutdown(controller: &RuntimeApiController) {
+    let (ack, rx) = tokio::sync::oneshot::channel();
+    if controller
+        .action_sender()
+        .send((ApiAction::Shutdown, ack))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = rx.await;
 }
 
 #[cfg(target_os = "macos")]
@@ -461,7 +503,7 @@ mod tests {
     use std::io::Write as _;
 
     use squib_api::{
-        ApiResponse,
+        ApiResponse, ControllerSnapshot, RuntimeApiController, TimeoutTable,
         schemas::{
             BootSourceConfig, MachineConfig, boot_source::RawBootSourceConfig,
             machine_config::RawMachineConfig,
@@ -546,5 +588,30 @@ mod tests {
         vm.shutdown()
             .await
             .unwrap_or_else(|err| panic!("shutdown after replay: {err}"));
+    }
+
+    #[tokio::test]
+    async fn test_should_shutdown_without_api_action_timeout() {
+        let snapshot = ControllerSnapshot::new("delayed-shutdown", "1.16.0", "1.16.0 (squib test)");
+        let mut timeouts = TimeoutTable::from_spec();
+        timeouts.other = Duration::from_millis(1);
+        let (controller, mut rx) = RuntimeApiController::new(snapshot, timeouts, 16);
+        let controller = Arc::new(controller);
+        let vmm_task = tokio::spawn(async move {
+            if let Some((ApiAction::Shutdown, ack)) = rx.recv().await {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                let _ = ack.send(ApiResponse::NoContent);
+            }
+        });
+        let mut vm = Squib {
+            controller,
+            vmm_task: Some(vmm_task),
+            api_task: None,
+            shutdown_sent: false,
+        };
+
+        vm.shutdown()
+            .await
+            .unwrap_or_else(|err| panic!("shutdown should bypass API timeout: {err}"));
     }
 }

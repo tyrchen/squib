@@ -124,6 +124,9 @@ pub struct VmnetIface {
 impl VmnetIface {
     /// Start the interface, blocking until vmnet's async `vmnet_start_interface`
     /// callback fires (or the timeout elapses).
+    // Non-macOS keeps the owned signature so callers see the same API as the
+    // macOS implementation, where the strings are moved into the FFI start params.
+    #[cfg_attr(not(target_os = "macos"), allow(clippy::needless_pass_by_value))]
     pub fn start(params: InterfaceParams) -> Result<Self, IfaceError> {
         #[cfg(target_os = "macos")]
         {

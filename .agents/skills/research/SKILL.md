@@ -1,6 +1,6 @@
 ---
 name: research
-description: Vendor reference repos as git submodules under ./vendors and produce deep research memos under ./docs/research covering architecture, design, key data structures, and load-bearing algorithms. Use whenever the user says "do research on X", "study how Y works", "submodule this repo and look into it", "understand the design of Z before we start", "spike on …", references prior-art crates / repos that should be evaluated, or asks to refer to ./vendors before designing or implementing. Trigger even when the user does not say the word "research" if they paste GitHub URLs and ask Claude to learn from them, compare alternatives, or extract patterns.
+description: Vendor reference repos as git submodules under ./vendors and produce deep research memos under ./docs/research covering architecture, design, key data structures, and load-bearing algorithms. Use whenever the user says "do research on X", "study how Y works", "submodule this repo and look into it", "understand the design of Z before we start", "spike on …", references prior-art crates / repos that should be evaluated, or asks to refer to ./vendors before designing or implementing. Trigger even when the user does not say the word "research" if they paste GitHub URLs and ask Codex to learn from them, compare alternatives, or extract patterns.
 ---
 
 # Research
@@ -13,14 +13,14 @@ Capture prior art with rigour: vendor the upstream code, read it deeply, write a
 - "submodule `<urls>` to `./vendors`" / "vendor `<repo>` for reference"
 - "before we design X, look into how `<crate>` does it"
 - "spike on `<assumption>`" — a single-question, time-boxed memo
-- The user pastes GitHub URLs and asks Claude to learn from them
+- The user pastes GitHub URLs and asks Codex to learn from them
 - The spec or impl skill needs prior-art before proceeding and there is no memo yet
 
 If `./docs/research/` already contains a relevant memo, **read it first** and decide whether to update it instead of writing a new one. Do not duplicate.
 
 ## What to produce
 
-For each topic, exactly one memo at `./docs/research/<kind>-<slug>.md` plus an updated `./docs/index.md` (or wherever the project's `CLAUDE.md` says research lives). Three memo kinds, picked by intent:
+For each topic, exactly one memo at `./docs/research/<kind>-<slug>.md` plus an updated `./docs/index.md` (or wherever the project's `AGENTS.md` says research lives). Three memo kinds, picked by intent:
 
 - **`spike-<slug>.md`** — a single, sharp, time-boxed question ("does `ArcSwap<Arc<dyn T>>` compose?", "is `linkme` reliable on macOS arm64 release+LTO?"). Validates one assumption with a runnable artefact. ≤ 2 pages.
 - **`study-<slug>.md`** — a deep-dive into one or more vendored repos ("how `tokio-rs/tracing` resolves dispatcher per call site", "how `defmt` interns log strings", "comparing how `prost` / `quick-protobuf` / `buffa` handle unknown fields"). 3–10 pages, cites file paths and line numbers.
@@ -114,7 +114,7 @@ Client                         Runtime                       External Service
 
 5. **Write the memo** using the template below. Keep it terse: a future reader (often the spec skill) wants the **decision** and the **why**, not a tour.
 
-6. **Wire it in** — append the memo to `./docs/index.md` under a "Research" section (create the file if missing). If the project's CLAUDE.md says research goes elsewhere, follow CLAUDE.md.
+6. **Wire it in** — append the memo to `./docs/index.md` under a "Research" section (create the file if missing). If the project's AGENTS.md says research goes elsewhere, follow AGENTS.md.
 
 ## Memo template
 

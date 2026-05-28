@@ -146,15 +146,15 @@ The two pair 1:1 against milestones but the order and grouping differ. Earlier d
    - `./specs/index.md` (if present) — what's already designed, what naming is used.
    - `./docs/research/` — every memo. Cite their decisions; do not re-litigate.
    - `./vendors/` — for prior art the design should align with or deliberately diverge from. Reference `vendors/<repo>/path:LINE` directly in the spec.
-   - **`CLAUDE.md` (project + user-global)** — engineering norms the spec **must** encode into design decisions, not just respect in spirit. The spec is allowed to set *tighter* rules; it must not silently relax CLAUDE.md. See the next subsection for the binding Rust checklist.
+   - **`AGENTS.md` (project + user-global)** — engineering norms the spec **must** encode into design decisions, not just respect in spirit. The spec is allowed to set *tighter* rules; it must not silently relax AGENTS.md. See the next subsection for the binding Rust checklist.
 
-### 2a. Bind Rust engineering norms (anchor: CLAUDE.md)
+### 2a. Bind Rust engineering norms (anchor: AGENTS.md)
 
-The spec commits the project to specific Rust patterns up front; the impl skill will then match those patterns line-for-line. Before drafting any component design, **read project `CLAUDE.md` and `~/.claude/CLAUDE.md`** and encode their norms into the spec text — not as a footnote, not "TBD per coding standards", but as concrete shapes (error types, async surfaces, validation points, lint sets, doc requirements) that a reviewer can mechanically check.
+The spec commits the project to specific Rust patterns up front; the impl skill will then match those patterns line-for-line. Before drafting any component design, **read project `AGENTS.md` and `~/.codex/AGENTS.md`** and encode their norms into the spec text — not as a footnote, not "TBD per coding standards", but as concrete shapes (error types, async surfaces, validation points, lint sets, doc requirements) that a reviewer can mechanically check.
 
-Do not restate CLAUDE.md in the spec; **reference it** ("Errors: per CLAUDE.md § Error Handling — `thiserror` enum with `#[source]`"). If a component genuinely needs to deviate, the spec must say "deviates from CLAUDE.md § X because …" so reviewers can challenge it. If CLAUDE.md is silent on a question the spec must answer, the spec sets the rule and `99-key-decisions.md` records why.
+Do not restate AGENTS.md in the spec; **reference it** ("Errors: per AGENTS.md § Error Handling — `thiserror` enum with `#[source]`"). If a component genuinely needs to deviate, the spec must say "deviates from AGENTS.md § X because …" so reviewers can challenge it. If AGENTS.md is silent on a question the spec must answer, the spec sets the rule and `99-key-decisions.md` records why.
 
-A component design (`11-…`, `12-…`, …) is not done until each CLAUDE.md section relevant to it (Error Handling, Async & Concurrency, Type Design & API, Safety & Security, Serialization, Testing, Logging & Observability, Performance, Documentation) is either pinned by reference or marked "N/A — <one-line reason>".
+A component design (`11-…`, `12-…`, …) is not done until each AGENTS.md section relevant to it (Error Handling, Async & Concurrency, Type Design & API, Safety & Security, Serialization, Testing, Logging & Observability, Performance, Documentation) is either pinned by reference or marked "N/A — <one-line reason>".
 
 3. **Run the research skill if prior art is missing** — if the design hinges on an assumption that has not been validated (a crate works under release+LTO; an API actually composes; a perf budget is achievable), invoke the research skill first. Do not bake unvalidated assumptions into a spec.
 

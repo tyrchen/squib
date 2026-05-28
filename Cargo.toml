@@ -140,19 +140,19 @@ criterion = { version = "0.8", default-features = false, features = [
 tempfile = "3.27"
 
 # workspace crates
-squib = { path = "crates/squib" }
-squib-core = { path = "crates/core" }
-squib-api = { path = "crates/api" }
-squib-arch = { path = "crates/arch" }
-squib-fdt = { path = "crates/fdt" }
-squib-loader = { path = "crates/loader" }
-squib-hv = { path = "crates/hv" }
-squib-gic = { path = "crates/gic" }
-squib-vmm = { path = "crates/vmm" }
-squib-bus = { path = "crates/bus" }
-squib-virtio = { path = "crates/virtio" }
-squib-mmds = { path = "crates/mmds" }
-squib-legacy = { path = "crates/legacy" }
-squib-net = { path = "crates/net" }
-squib-snapshot = { path = "crates/snapshot" }
-squib-host = { path = "crates/host" }
+squib = { version = "0.1.0", path = "crates/squib" }
+squib-core = { version = "0.1.0", path = "crates/core" }
+squib-api = { version = "0.1.0", path = "crates/api" }
+squib-arch = { version = "0.1.0", path = "crates/arch" }
+squib-fdt = { version = "0.1.0", path = "crates/fdt" }
+squib-loader = { version = "0.1.0", path = "crates/loader" }
+squib-hv = { version = "0.1.0", path = "crates/hv" }
+squib-gic = { version = "0.1.0", path = "crates/gic" }
+squib-vmm = { version = "0.1.0", path = "crates/vmm" }
+squib-bus = { version = "0.1.0", path = "crates/bus" }
+squib-virtio = { version = "0.1.0", path = "crates/virtio" }
+squib-mmds = { version = "0.1.0", path = "crates/mmds" }
+squib-legacy = { version = "0.1.0", path = "crates/legacy" }
+squib-net = { version = "0.1.0", path = "crates/net" }
+squib-snapshot = { version = "0.1.0", path = "crates/snapshot" }
+squib-host = { version = "0.1.0", path = "crates/host" }

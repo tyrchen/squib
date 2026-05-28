@@ -34,7 +34,7 @@ make sign        # ad-hoc-sign squib + squib-jail with com.apple.security.hyperv
 make verify      # codesign --display + --verify on both
 ```
 
-The `Makefile` codesigns from `apps/squib/squib.entitlements`. To build the
+The `Makefile` codesigns from `apps/squib-cli/squib.entitlements`. To build the
 bridged variant:
 
 ```bash

@@ -394,7 +394,7 @@ mod tests {
         };
         let artifacts = build_microvm_for_boot(&res).unwrap();
         assert_eq!(artifacts.kernel_load_addr, DRAM_BASE + 0x20_0000);
-        assert!(artifacts.fdt_bytes.len() < FDT_MAX_SIZE as usize);
+        assert!(u64::try_from(artifacts.fdt_bytes.len()).is_ok_and(|len| len < FDT_MAX_SIZE));
         // FDT base = ram_end - 2 MiB.
         assert_eq!(
             artifacts.fdt_base,

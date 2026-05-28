@@ -2,7 +2,8 @@
 //! [`squib_hv::HvfGicSnapshot`].
 //!
 //! 1. Init the singleton VM, create a vCPU on its owner thread.
-//! 2. Set X0..X4, PC, PSTATE, FPCR, FPSR, SCTLR_EL1, MAIR_EL1, VBAR_EL1 to known sentinel values.
+//! 2. Set `X0`..`X4`, `PC`, `PSTATE`, `FPCR`, `FPSR`, `SCTLR_EL1`, `MAIR_EL1`, `VBAR_EL1` to known
+//!    sentinel values.
 //! 3. Capture vCPU state through `HvfVcpuSnapshot`.
 //! 4. Reset registers to zero (defensive — confirms capture really pulled from HVF, not from a
 //!    cached value).

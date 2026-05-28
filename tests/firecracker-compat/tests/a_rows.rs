@@ -9,8 +9,8 @@
 //! - `/snapshot/load.clock_realtime` — x86-only kvmclock setting; ignored.
 //! - `/cpu-config` x86 fields — `cpuid_modifiers`, `msr_modifiers`, `kvm_capabilities`
 //!   accept-and-warn.
-//! - `--seccomp-filter` / `--no-seccomp` CLI flags — covered by `apps/squib/tests`.
-//! - `--enable-pci` CLI flag — covered by `apps/squib/tests`.
+//! - `--seccomp-filter` / `--no-seccomp` CLI flags — covered by `apps/squib-cli/tests`.
+//! - `--enable-pci` CLI flag — covered by `apps/squib-cli/tests`.
 
 use firecracker_compat::{
     CompatServer,

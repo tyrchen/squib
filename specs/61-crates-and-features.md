@@ -18,10 +18,11 @@ Pin the crate graph. Squib is one Rust workspace; this file is the index of crat
 
 ```
 apps/
-  squib/                  → CLI binary, code-signed with entitlements
+  squib-cli/              → CLI binary named `squib`, code-signed with entitlements
   squib-jail/             → drop-in jailer shim (Firecracker-flag-compatible)
 
 crates/
+  squib/       (squib)             → public facade for embedded callers and shared runtime wiring
   core/        (squib-core)        → portable types & traits
   api/         (squib-api)         → Firecracker-compatible REST + JSON config loader (axum on UDS)
   hv/          (squib-hv)          → HVF binding via applevisor; the unsafe boundary
@@ -43,11 +44,14 @@ This mirrors the alioth/libkrun layout with squib-specific names. Each crate has
 ## 3. Dependency graph
 
 ```text
-                ┌─── apps/squib (binary)
+                ┌─── apps/squib-cli (binary: squib)
                 │
        apps/squib-jail (binary; depends on nothing except std + libc)
                 │
                 ▼
+          crates/squib (facade)
+              │        │
+              ▼        ▼
             squib-vmm ─────────── squib-api
             ╱   ╱   ╲                │
        squib-virtio  squib-snapshot  squib-mmds
@@ -68,6 +72,10 @@ This mirrors the alioth/libkrun layout with squib-specific names. Each crate has
 The `squib-core` crate has zero **squib-workspace** dependencies and only the lightest external ones (`thiserror`, `serde`, `smallvec`). Every other crate transitively depends on it. The "no workspace deps" half of I-CRATE-1 is the load-bearing half: it's what keeps the dependency DAG acyclic.
 
 `squib-hv` is the only crate that links `applevisor`. `squib-net` is the only crate that opens an `unsafe` block for `vmnet`. `#![forbid(unsafe_code)]` everywhere else.
+
+The package name `squib` is reserved for the embeddable facade crate. The CLI package is
+`squib-cli`, but it still declares `[[bin]] name = "squib"` so release artifacts and operator
+commands remain unchanged. See [22-embedding-facade.md](./22-embedding-facade.md).
 
 ## 4. External dependency catalogue
 
@@ -138,16 +146,18 @@ We **do not** depend on `vmm-sys-util`, `kvm-bindings`, `kvm-ioctls`, `vhost-*`,
 
 ## 5. Feature flags
 
-Squib is a binary, not a library, so feature flags are minimal. Per crate:
+Squib is both a facade library and a CLI binary. Feature flags are minimal and stay tied to
+runtime capability rather than product variants. Per crate:
 
 | Crate | Feature | Effect |
 |-------|---------|--------|
+| squib | `bridged` | forwards to `squib-net/bridged` so embedded callers and the CLI use the same entitlement-gated network path. |
 | squib-vmm | `bench` | enables criterion bench harnesses |
 | squib-snapshot | `postcopy` | compile in the Mach-exception pager (default-on for `squib`, off for tests) |
 | squib-net | `bridged` | compile in bridged-mode codepath (off by default; flipped by build that has the `com.apple.vm.networking` restricted entitlement) |
 | squib-api | `openapi` | embed the OpenAPI document; `--openapi` then serves `/openapi.json` |
 
-`apps/squib` enables `postcopy`, `openapi` by default; CI also exercises a build with all features off to catch flag-rot.
+`apps/squib-cli` enables the facade defaults and produces the `squib` binary; CI also exercises a build with all features off to catch flag-rot.
 
 ## 6. Build configuration
 

@@ -13,12 +13,12 @@
 //! Per [70-security.md § 4](../../../specs/70-security.md#4-input-validation), every
 //! external string crossing into squib goes through a fallible-constructor newtype before
 //! reaching downstream code. For host-filesystem paths the canonical newtype is
-//! [`squib_api::schemas::common::SafePath`]: byte-length cap of 1024, NUL-byte rejection,
+//! `squib_api::schemas::common::SafePath`: byte-length cap of 1024, NUL-byte rejection,
 //! charset / parent-traversal handled at the API layer.
 //!
 //! The loader sits below the API layer and accepts a `&Path` for `load_from_path`. To
 //! make the trust boundary load-bearing rather than aspirational, this crate also runs a
-//! **defence-in-depth** check on the path before opening it ([`enforce_path_bounds`]):
+//! **defence-in-depth** check on the path before opening it (`enforce_path_bounds`):
 //! length cap of 1024 bytes, NUL-byte rejection. A buggy caller that bypasses the API
 //! layer surfaces a [`LoaderError::PathRejected`] instead of letting a megabyte path or
 //! an interior-NUL path reach `std::fs::metadata`.

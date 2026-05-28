@@ -2,13 +2,13 @@
 title: 50-cli — squib CLI surface (clap)
 type: design
 status: draft
-last_updated: 2026-05-03
-depends_on: 20-firecracker-api.md, 21-api-compat-matrix.md
+last_updated: 2026-05-28
+depends_on: 20-firecracker-api.md, 21-api-compat-matrix.md, 22-embedding-facade.md
 ---
 
 # 50 · CLI — squib CLI surface
 
-Status: draft · Owner: apps/squib · Depends on: [20-firecracker-api.md](./20-firecracker-api.md), [21-api-compat-matrix.md](./21-api-compat-matrix.md)
+Status: draft · Owner: apps/squib-cli · Depends on: [20-firecracker-api.md](./20-firecracker-api.md), [21-api-compat-matrix.md](./21-api-compat-matrix.md), [22-embedding-facade.md](./22-embedding-facade.md)
 
 ## 1. Purpose
 
@@ -18,6 +18,8 @@ Pin the surface of the `squib` binary's command-line. Two contracts:
 2. Squib-only extension flags (e.g. `--network`) live in a clearly-marked block so the diff against upstream is visible.
 
 The full per-flag bookkeeping is in [21-api-compat-matrix.md § 3](./21-api-compat-matrix.md#3-cli-flag-compatibility); this file covers the *parser shape* and the binary-level behaviours.
+
+The Cargo package that owns the binary is `squib-cli` under `apps/squib-cli`. The emitted binary is still named `squib`. Runtime startup delegates to the public facade crate described in [22-embedding-facade.md](./22-embedding-facade.md), so the CLI and embedded callers share one controller/VMM loop implementation.
 
 ## 2. Parser
 

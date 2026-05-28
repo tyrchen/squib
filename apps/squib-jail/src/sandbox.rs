@@ -17,12 +17,15 @@ use crate::{
 
 /// `default` profile body. Deny network egress, allow vmnet socket, allow
 /// `/srv/jailer/<id>` r/w.
+#[cfg(any(target_os = "macos", test))]
 const PROFILE_DEFAULT: &str = include_str!("../profiles/default.sb");
 
 /// `permissive` profile body. Close to no sandboxing; for debugging.
+#[cfg(any(target_os = "macos", test))]
 const PROFILE_PERMISSIVE: &str = include_str!("../profiles/permissive.sb");
 
 /// Resolve a [`SandboxProfile`] enum variant to the embedded profile body.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn profile_body(profile: SandboxProfile) -> &'static str {
     match profile {
         SandboxProfile::Default => PROFILE_DEFAULT,

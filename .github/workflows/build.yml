@@ -19,6 +19,8 @@ jobs:
       matrix:
         platform: [ubuntu-latest]
     runs-on: ${{ matrix.platform }}
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     # services:
     #   postgres:
     #     image: postgres:14.5

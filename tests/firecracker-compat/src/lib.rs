@@ -21,7 +21,7 @@
 //! crate (the same `axum::Router` the production binary builds) over a real Unix
 //! domain socket. The VMM event loop is replaced by a minimal acker so endpoints that
 //! require a live VMM (`InstanceStart`, `PUT /snapshot/*`) get a deterministic stub
-//! response — mirroring the shape `apps/squib/src/main.rs` exposes today. Live-VM
+//! response — mirroring the shape `crates/squib/src/lib.rs` exposes today. Live-VM
 //! parity is a Phase 1/3 deliverable; this suite verifies *wire-shape* parity.
 //!
 //! # Layout

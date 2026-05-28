@@ -126,7 +126,7 @@ pub struct VsockSpec {
     /// Whether TSI mode was requested.
     pub tsi: bool,
     /// Host-side multiplexer. For tok-dev this is the
-    /// `apps/squib/src/vsock_muxer::UdsVsockMuxer`.
+    /// `crates/squib/src/vsock_muxer.rs::UdsVsockMuxer`.
     pub muxer: Arc<dyn VsockMuxer>,
 }
 

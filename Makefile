@@ -1,6 +1,6 @@
 CARGO ?= cargo
-ENTITLEMENTS := apps/squib/squib.entitlements
-ENTITLEMENTS_BRIDGED := apps/squib/squib-bridged.entitlements
+ENTITLEMENTS := apps/squib-cli/squib.entitlements
+ENTITLEMENTS_BRIDGED := apps/squib-cli/squib-bridged.entitlements
 # `cargo metadata` → `jq` instead of `python3`; jq is already a hard requirement
 # for `make hvf-test` / `make vmnet-test`, so we get one less interpreter on
 # the critical path.
@@ -174,14 +174,14 @@ snapshot-smoke:
 	@rm -f /tmp/squib_smoke.snap /tmp/squib_smoke.mem /tmp/squib_smoke_corrupt.snap
 	@$(CARGO) run --quiet --example produce_demo_pair --package squib-snapshot -- /tmp/squib_smoke
 	@echo "--- describe (clean) ---"
-	@$(CARGO) run --quiet -p squib -- --describe-snapshot /tmp/squib_smoke.snap
+	@$(CARGO) run --quiet -p squib-cli --bin squib -- --describe-snapshot /tmp/squib_smoke.snap
 	@cp /tmp/squib_smoke.snap /tmp/squib_smoke_corrupt.snap
 	@python3 -c "p='/tmp/squib_smoke_corrupt.snap'; b=bytearray(open(p,'rb').read()); b[-1]^=0x01; open(p,'wb').write(bytes(b))"
 	@echo "--- describe (corrupt CRC; expect exit=2) ---"
-	@$(CARGO) run --quiet -p squib -- --describe-snapshot /tmp/squib_smoke_corrupt.snap; \
+	@$(CARGO) run --quiet -p squib-cli --bin squib -- --describe-snapshot /tmp/squib_smoke_corrupt.snap; \
 	    rc=$$?; if [ $$rc -ne 2 ]; then echo "FAIL: corrupt describe returned $$rc, expected 2"; exit 1; fi
 	@echo "--- snapshot-version ---"
-	@$(CARGO) run --quiet -p squib -- --snapshot-version
+	@$(CARGO) run --quiet -p squib-cli --bin squib -- --snapshot-version
 	@echo "snapshot-smoke: ok"
 
 # Build a stapleable installer .pkg carrying signed squib + squib-jail.

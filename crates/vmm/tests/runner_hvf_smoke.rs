@@ -2,8 +2,8 @@
 //!
 //! Boots a hand-coded aarch64 stub program that:
 //!
-//! 1. Writes `O`, `K`, `\n` to PL011 `DR` (0x0E0A_0000).
-//! 2. Issues `HVC #0` with X0 = `PSCI_SYSTEM_OFF` (0x8400_0008).
+//! 1. Writes `O`, `K`, `\n` to PL011 `DR` (`0x0E0A_0000`).
+//! 2. Issues `HVC #0` with X0 = `PSCI_SYSTEM_OFF` (`0x8400_0008`).
 //!
 //! Verifies the host-side runner:
 //! - Spawned the vCPU thread and set boot regs.

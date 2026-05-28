@@ -150,7 +150,7 @@ mod tests {
         assert!(vcpu.check_affinity().is_ok());
 
         let owning = vcpu.owning_thread;
-        let result = std::thread::spawn(move || {
+        let result = thread::spawn(move || {
             // PANIC in debug; ThreadAffinityError in release. Use catch_unwind so this
             // test runs cleanly in both.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

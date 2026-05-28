@@ -20,6 +20,7 @@ Squib is **Apple-Silicon-only**, **HVF-only** (no VZ), **aarch64 Linux guests on
 | 16  | [16-snapshots.md](./16-snapshots.md) | design | `bitcode + serde` state file, sparse memory, `hv_vm_protect` dirty tracking, Mach-exception postcopy. |
 | 20  | [20-firecracker-api.md](./20-firecracker-api.md) | design | axum on UDS, error model, state machine, static-config replay. |
 | 21  | [21-api-compat-matrix.md](./21-api-compat-matrix.md) | design | Line-by-line bookkeeping: every endpoint, field, CLI flag with status (F / P / A / R). |
+| 22  | [22-embedding-facade.md](./22-embedding-facade.md) | design | Public Rust facade crate for embedded callers; package rename that preserves the `squib` binary. |
 | 30  | [30-networking.md](./30-networking.md) | design | vmnet shared / bridged / host modes; gvproxy userspace fallback. |
 | 40  | [40-jailer.md](./40-jailer.md) | design | `squib-jail` Darwin shim with the upstream jailer flag set. |
 | 50  | [50-cli.md](./50-cli.md) | design | clap surface for `squib`, mode selection, tracing setup. |
@@ -42,7 +43,7 @@ For a new contributor:
 3. [11-runtime-core.md](./11-runtime-core.md) → [12-hvf-backend.md](./12-hvf-backend.md) → [13-arch-and-boot.md](./13-arch-and-boot.md) — the spine.
 4. [10-data-model.md](./10-data-model.md) — every wire and cross-thread shape.
 5. [14-virtio-and-devices.md](./14-virtio-and-devices.md) → [15-mmds.md](./15-mmds.md) → [30-networking.md](./30-networking.md) → [16-snapshots.md](./16-snapshots.md) — the device tree, networking, snapshots.
-6. [20-firecracker-api.md](./20-firecracker-api.md) → [21-api-compat-matrix.md](./21-api-compat-matrix.md) — the API surface.
+6. [20-firecracker-api.md](./20-firecracker-api.md) → [21-api-compat-matrix.md](./21-api-compat-matrix.md) → [22-embedding-facade.md](./22-embedding-facade.md) — the API surface and embedded facade.
 7. [40-jailer.md](./40-jailer.md), [50-cli.md](./50-cli.md), [61-crates-and-features.md](./61-crates-and-features.md) — packaging and entry points.
 8. [70-security.md](./70-security.md), [71-performance-budgets.md](./71-performance-budgets.md), [72-testing-strategy.md](./72-testing-strategy.md) — cross-cuts read alongside, not in sequence.
 9. [80-glossary.md](./80-glossary.md) — disambiguate as needed.
@@ -62,6 +63,9 @@ For a stakeholder: [00-prd.md](./00-prd.md) → [90-roadmap.md](./90-roadmap.md)
                                               │
                                               ▼
                        20-firecracker-api ◄────┴──────► 21-api-compat-matrix
+                                              │
+                                              ▼
+                                      22-embedding-facade
                                               │
                                               ▼
                        40-jailer ─────► 50-cli

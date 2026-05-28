@@ -172,22 +172,29 @@ pub fn router(controller: Arc<RuntimeApiController>, max_payload: usize) -> Rout
         .layer(trace_layer)
 }
 
-/// Bind a Unix domain socket and serve the API on it until the future is dropped.
+/// Bind a Unix domain socket for [`serve_bound`].
 ///
 /// Removes any stale socket file at `opts.socket_path` before binding (Firecracker
 /// does the same — long-running VMM hosts often relaunch with the same path).
 ///
 /// # Errors
-/// Returns an error if the socket file cannot be unlinked, the bind fails, or the
-/// underlying axum service errors.
-pub async fn serve(
-    opts: ServeOptions,
-    controller: Arc<RuntimeApiController>,
-) -> std::io::Result<()> {
+/// Returns an error if the socket file cannot be unlinked or the bind fails.
+pub async fn bind_listener(opts: &ServeOptions) -> std::io::Result<UnixListener> {
     if opts.socket_path.exists() {
         tokio::fs::remove_file(&opts.socket_path).await?;
     }
-    let listener = UnixListener::bind(&opts.socket_path)?;
+    UnixListener::bind(&opts.socket_path)
+}
+
+/// Serve the API on an already-bound Unix listener until the future is dropped.
+///
+/// # Errors
+/// Returns an error if the underlying axum service errors.
+pub async fn serve_bound(
+    listener: UnixListener,
+    opts: ServeOptions,
+    controller: Arc<RuntimeApiController>,
+) -> std::io::Result<()> {
     info!(
         socket = %opts.socket_path.display(),
         max_payload_size = opts.max_payload_size,
@@ -196,6 +203,19 @@ pub async fn serve(
 
     let app = router(controller, opts.max_payload_size);
     axum_serve(listener, app).await
+}
+
+/// Bind a Unix domain socket and serve the API on it until the future is dropped.
+///
+/// # Errors
+/// Returns an error if the socket file cannot be unlinked, the bind fails, or the
+/// underlying axum service errors.
+pub async fn serve(
+    opts: ServeOptions,
+    controller: Arc<RuntimeApiController>,
+) -> std::io::Result<()> {
+    let listener = bind_listener(&opts).await?;
+    serve_bound(listener, opts, controller).await
 }
 
 /// Best-effort cleanup helper: unlinks `path` if present, ignoring `NotFound`.

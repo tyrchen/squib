@@ -1,6 +1,6 @@
 //! `squib-jail` — Darwin shim for the Firecracker `jailer` binary.
 //!
-//! Runs the upstream-jailer flag set, applies the safe Darwin subset
+//! Runs the upstream-jailer flag set, applies the safe Unix subset
 //! (`chroot(2)` + `setuid(2)` + `setgid(2)` + `setrlimit(2)` + optional
 //! `setsid(2)` + optional `sandbox_init(3)`), and `execv(2)`s into the
 //! staged `--exec-file`. The Linux-only flags (`--cgroup`, `--netns`,
@@ -8,19 +8,18 @@
 //!
 //! ## Crate-level lints
 //!
-//! * `unsafe_code` is allowed only on macOS, mirroring the `squib-host` pattern. The privilege-drop
-//!   syscalls (`chroot` / `setuid` / `setgid` / `setrlimit` / `setsid` / `execv`) and
-//!   `sandbox_init(3)` are all `extern "C"` calls with no safe wrapper. Total `unsafe` LOC ≈ 30,
-//!   all in [`sandbox`] and [`sequence`], each block prefixed with `// SAFETY:` per CLAUDE.md §
-//!   Safety & Security.
+//! * `unsafe_code` is allowed for the privilege-drop syscall boundary. The syscalls (`chroot` /
+//!   `setuid` / `setgid` / `setrlimit` / `setsid` / `execv`) and `sandbox_init(3)` are all `extern
+//!   "C"` calls with no safe wrapper. Total `unsafe` LOC ≈ 30, all in [`mod@env`], [`resource`],
+//!   [`sandbox`] and [`sequence`], each block prefixed with `// SAFETY:` per
+//!   `specs/70-security.md`.
 //! * `clippy::disallowed_methods` is allowed crate-wide because squib-jail is a strictly
 //!   synchronous setuid shim. The workspace clippy.toml maps `std::fs::*` to their `tokio::fs::*`
 //!   async counterparts; that mapping is correct for the rest of the workspace and incorrect for a
 //!   binary that must not pull a tokio runtime in before `execv(2)`. The replacement is documented
 //!   in `specs/40-jailer.md` § 1 ("the privilege- drop work happens before squib itself runs").
 
-#![cfg_attr(not(target_os = "macos"), forbid(unsafe_code))]
-#![cfg_attr(target_os = "macos", deny(unsafe_op_in_unsafe_fn))]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use clap::Parser;

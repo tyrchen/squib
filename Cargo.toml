@@ -140,6 +140,7 @@ criterion = { version = "0.8", default-features = false, features = [
 tempfile = "3.27"
 
 # workspace crates
+squib = { path = "crates/squib" }
 squib-core = { path = "crates/core" }
 squib-api = { path = "crates/api" }
 squib-arch = { path = "crates/arch" }

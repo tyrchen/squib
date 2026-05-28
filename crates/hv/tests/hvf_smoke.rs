@@ -14,7 +14,7 @@
 //!    `0xD400_0002`) at offset 0.
 //! 4. A dedicated thread fetches the singleton `VirtualMachineStaticInstance` (the HVF rule:
 //!    `vcpu_create` must run on the thread that drives `run()`), creates the vCPU, sets `PC =
-//!    DRAM_BASE` and `PSTATE = BOOT_PSTATE` (EL1h, DAIF masked), and calls `vcpu.run()`.
+//!    DRAM_BASE` and `PSTATE = BOOT_PSTATE` (`EL1h`, `DAIF` masked), and calls `vcpu.run()`.
 //! 5. The trap returns with `ExitReason::EXCEPTION`; we read the syndrome via
 //!    `vcpu.get_exit_info()` and feed it through `squib_arch::decode_esr`.
 //! 6. The decoder yields `EsrDecoded::Hvc { imm16: 0 }` — confirming end-to-end that the binding

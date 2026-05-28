@@ -29,7 +29,9 @@
 use std::time::Duration;
 
 use thiserror::Error;
-use tracing::{debug, warn};
+#[cfg(target_os = "macos")]
+use tracing::debug;
+use tracing::warn;
 
 use crate::mode::VmnetMode;
 #[cfg(target_os = "macos")]

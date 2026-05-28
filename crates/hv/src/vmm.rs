@@ -14,6 +14,7 @@ use applevisor::{
     vcpu::Vcpu as VirtualCpu,
     vm::{GicEnabled, VirtualMachineConfig, VirtualMachineInstance, VirtualMachineStaticInstance},
 };
+#[cfg(target_os = "macos")]
 use squib_arch::layout::{GICD_BASE, GICR_BASE};
 use thiserror::Error;
 

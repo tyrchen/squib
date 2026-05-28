@@ -46,6 +46,7 @@ use super::HvfVm;
 /// holds. Pass the resulting `Arc<HvfMemBackend>` as the
 /// `Arc<dyn squib_virtio::devices::mem::MemHotplugBackend>` argument to
 /// `MemDevice::new`.
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 pub struct HvfMemBackend {
     vm: Arc<HvfVm>,

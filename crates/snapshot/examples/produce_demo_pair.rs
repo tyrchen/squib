@@ -3,7 +3,7 @@
 //! Usage:
 //! ```sh
 //! cargo run --example produce_demo_pair --package squib-snapshot -- /tmp/demo
-//! cargo run -p squib -- --describe-snapshot /tmp/demo.snap
+//! cargo run -p squib-cli --bin squib -- --describe-snapshot /tmp/demo.snap
 //! ```
 //!
 //! Produces `<base>.snap` + `<base>.mem` against the live `squib_snapshot::save`

@@ -10,7 +10,7 @@ English: [dev-guide.md](./dev-guide.md)。
 
 squib 是单个 Rust workspace：一个主二进制（`squib`）、一个辅助二进制
 （`squib-jail`）、外加按职责拆出来的十几个 lib crate。crate 图是严格的
-DAG —— 最底下是零依赖的 `squib-core`，最顶上是 `apps/squib`。
+DAG —— 最底下是零依赖的 `squib-core`，最顶上是 `apps/squib-cli`。
 
 两条铁律：
 
@@ -131,7 +131,7 @@ HVF 实现都在 `squib-hv` 里。凡是要碰 `applevisor` 或 `hv_*` 的代码
 | 改 HVF | 只动 `squib-hv` | [12-hvf-backend.md](../specs/12-hvf-backend.md) |
 | 改网络 | `squib-net`、device manager | [30-networking.md](../specs/30-networking.md) |
 | 改快照 | `squib-snapshot`、`squib-host`（postcopy） | [16-snapshots.md](../specs/16-snapshots.md) |
-| 加 CLI flag | `apps/squib/src/cli.rs`、compat matrix | [50-cli.md](../specs/50-cli.md) |
+| 加 CLI flag | `apps/squib-cli/src/cli.rs`、compat matrix | [50-cli.md](../specs/50-cli.md) |
 
 凡是会动 wire 形态的改动，固定流程：
 

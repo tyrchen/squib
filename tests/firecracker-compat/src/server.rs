@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 
 /// Stub VMM behaviour the harness applies to the `(action, ack)` channel.
 ///
-/// `Production` mirrors `apps/squib/src/main.rs::stub_vmm_loop` — the shape end-to-end
+/// `Production` mirrors `crates/squib/src/lib.rs::stub_vmm_loop` — the shape end-to-end
 /// SDK soak tests observe. `AlwaysAck` drains every action with `204 No Content`,
 /// useful when a test only cares about the request-line / parsing path.
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +109,7 @@ impl CompatServer {
     }
 }
 
-/// Stub VMM event loop. Mirrors `apps/squib/src/main.rs::stub_vmm_loop` for
+/// Stub VMM event loop. Mirrors `crates/squib/src/lib.rs::stub_vmm_loop` for
 /// `Production` and a flat `204` for `AlwaysAck`.
 async fn stub_vmm_loop(mut rx: ActionReceiver, behaviour: StubBehaviour) {
     while let Some((action, ack)) = rx.recv().await {

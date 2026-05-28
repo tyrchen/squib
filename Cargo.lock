@@ -1135,7 +1135,6 @@ name = "squib"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "parking_lot",
  "squib-api",
  "squib-arch",
@@ -1147,13 +1146,12 @@ dependencies = [
  "squib-legacy",
  "squib-mmds",
  "squib-net",
- "squib-snapshot",
  "squib-virtio",
  "squib-vmm",
  "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1190,6 +1188,20 @@ dependencies = [
  "parking_lot",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "squib-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "squib",
+ "squib-net",
+ "squib-snapshot",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

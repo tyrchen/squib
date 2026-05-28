@@ -153,7 +153,7 @@ pub(crate) enum SandboxProfile {
     Permissive,
 }
 
-/// Tracing log level shared with `apps/squib`.
+/// Tracing log level shared with `apps/squib-cli`.
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 #[value(rename_all = "PascalCase")]
 pub(crate) enum LogLevel {

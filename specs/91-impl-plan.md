@@ -19,7 +19,7 @@ What is ready, what isn't, and what blocks Phase 1 today.
 - Workspace skeleton (`Cargo.toml`, `rust-toolchain.toml` pinning Rust 1.95, workspace lints).
 - `crates/core` (`squib-core`) with `HypervisorBackend`, `Vm`, `Vcpu`, `VmExit`, `GuestRange`, `Protection`, `Error` skeletons.
 - `crates/api` (`squib-api`) skeleton with axum-on-UDS server stub.
-- `apps/squib/src/cli.rs` covering the entire Firecracker-compatible flag set + squib extensions.
+- `apps/squib-cli/src/cli.rs` covering the entire Firecracker-compatible flag set + squib extensions.
 - 16 unit tests passing; `clippy -D warnings` clean; nightly fmt clean.
 
 **Pending Phase 0 follow-ups before Phase 1 kicks off** — grouped by theme, each item links to the D-record that justifies it. None of these are "polish"; each one breaks something downstream if deferred.
@@ -73,8 +73,8 @@ Already shipped. See § 0 above for the deliverables and pending follow-ups.
 | 0.1 | Workspace skeleton, lints, toolchain pin | crates/, apps/, Cargo.toml | DONE |
 | 0.2 | `squib-core` traits | crates/core | DONE |
 | 0.3 | API server skeleton | crates/api | DONE |
-| 0.4 | CLI parser | apps/squib | DONE |
-| 0.5 | Drop `BackendKind::Vz`, drop `--hypervisor` | crates/core, apps/squib | 1 day |
+| 0.4 | CLI parser | apps/squib-cli | DONE |
+| 0.5 | Drop `BackendKind::Vz`, drop `--hypervisor` | crates/core, apps/squib-cli | 1 day |
 | 0.6 | `squib.entitlements` + `make sign` | Makefile, build/ | 1 day |
 | 0.7 | `MACOSX_DEPLOYMENT_TARGET=15.0` | .cargo/config.toml | 30 min |
 
@@ -109,6 +109,19 @@ Parallelizable with Phase 1. Drives every endpoint against a stub VMM until the 
 | 2.5 | Per-endpoint unit + integration tests; record-replay against upstream `getting-started.md` curl sequence; soak test interleaving long `PUT /snapshot/load` with rapid `GET /` to pin I-API-7 | [72-testing-strategy.md § 2,3](./72-testing-strategy.md#2-pyramid) | 1 wk |
 
 **Exit criteria**: every endpoint returns the documented status for at least one happy-path call; the upstream `getting-started.md` sequence runs against a stub-VMM squib through `InstanceStart` (which still returns "VMM not yet wired" until Phase 1 lands). Per-action-class timeouts are enforced and verified to surface as 504 (not 500). Phase 2 + Phase 1 together close M1's API surface dimension.
+
+### 5.6 Phase 2.6 — Embedding facade
+
+This phaselet lands after the API controller and VMM loop exist. It does not change Firecracker wire compatibility; it makes the existing runtime usable by other Rust applications in-process.
+
+| # | Task | Spec | Effort |
+|---|------|------|--------|
+| 2.6.1 | Move the current CLI package from `apps/squib` to `apps/squib-cli`; keep `[[bin]] name = "squib"` and all CLI flags unchanged. | [22-embedding-facade.md § 4](./22-embedding-facade.md#4-crate-and-package-layout), [50-cli.md](./50-cli.md) | 0.5 day |
+| 2.6.2 | Add `crates/squib` package `squib` with public `SquibBuilder`, `Squib`, `SquibError`, and runtime options. | [22-embedding-facade.md § 5](./22-embedding-facade.md#5-public-api-contract) | 1 day |
+| 2.6.3 | Move shared runtime/VMM loop wiring out of the CLI into the facade crate; CLI delegates to `SquibBuilder::spawn`. | [22-embedding-facade.md § 6](./22-embedding-facade.md#6-runtime-lifecycle) | 1 day |
+| 2.6.4 | Add facade tests for stub spawn/dispatch/shutdown and config-file replay with `start_microvm=false`; update crate graph docs and Makefile package references. | [22-embedding-facade.md § 8](./22-embedding-facade.md#8-tests-and-exit-criteria) | 0.5 day |
+
+**Exit criteria**: I-FACADE-1 through I-FACADE-5 hold; `cargo build --bin squib` produces the CLI; facade tests pass on non-macOS without HVF; the full Rust verification gate remains green.
 
 ## 6. Phase 3 — Devices and MMDS (weeks 4–9)
 
@@ -187,7 +200,7 @@ These run continuously alongside the phases above.
 Per [72-testing-strategy.md](./72-testing-strategy.md):
 
 - Unit tests in `#[cfg(test)] mod tests` per file. `rstest` for parameterized; `proptest` for invariants.
-- Integration tests in `tests/` per crate, plus top-level `apps/squib/tests/` driving the binary via `assert_cmd`.
+- Integration tests in `tests/` per crate, plus top-level `apps/squib-cli/tests/` driving the binary via `assert_cmd`.
 - Compat suite (Phase 7).
 - Snapshot golden tests in `tests/fixtures/snapshots/`.
 - Performance tests with criterion (Phase 1 onward).

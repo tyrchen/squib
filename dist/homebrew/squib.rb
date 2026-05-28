@@ -61,8 +61,8 @@ class Squib < Formula
 
     # Ship the entitlement plists alongside the binaries so a brew user
     # can re-sign with their own Developer ID if required.
-    (share/"squib").install "apps/squib/squib.entitlements"
-    (share/"squib").install "apps/squib/squib-bridged.entitlements"
+    (share/"squib").install "apps/squib-cli/squib.entitlements"
+    (share/"squib").install "apps/squib-cli/squib-bridged.entitlements"
     (share/"squib").install "apps/squib-jail/squib-jail.entitlements"
 
     # Install the bundled `gvproxy` binary at the canonical path squib

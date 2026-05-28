@@ -12,7 +12,7 @@ read the [user guide](./user-guide.md) and have a working `make sign` build.
 Squib is one Rust workspace, one binary (`squib`), one supplementary binary
 (`squib-jail`), and ~16 library crates organized by responsibility. The crate
 graph is a strict DAG with `squib-core` (zero workspace deps) at the bottom
-and `apps/squib` at the top.
+and `apps/squib-cli` at the top.
 
 The two load-bearing rules:
 
@@ -140,7 +140,7 @@ into one of these buckets:
 | Touch HVF | `squib-hv` only | [12-hvf-backend.md](../specs/12-hvf-backend.md) |
 | Change networking | `squib-net`, the device manager | [30-networking.md](../specs/30-networking.md) |
 | Touch snapshots | `squib-snapshot`, `squib-host` (postcopy) | [16-snapshots.md](../specs/16-snapshots.md) |
-| Add a CLI flag | `apps/squib/src/cli.rs`, the compat matrix | [50-cli.md](../specs/50-cli.md) |
+| Add a CLI flag | `apps/squib-cli/src/cli.rs`, the compat matrix | [50-cli.md](../specs/50-cli.md) |
 
 The pattern for any change that can affect a wire shape:
 

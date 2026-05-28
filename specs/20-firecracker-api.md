@@ -155,7 +155,7 @@ Per CLAUDE.md § Async & Concurrency: `ArcSwap` for the infrequently-updated mir
 
 ## 6. Static config file (`--config-file`)
 
-`apps/squib/src/cli.rs` parses `--config-file <path>` and, if present, opens the file and loads it through the same code path as the API server, but as an in-process replay of `ApiAction`s.
+`apps/squib-cli/src/cli.rs` parses `--config-file <path>` and delegates startup to the `squib` facade crate, which opens the file and loads it through the same code path as the API server, but as an in-process replay of `ApiAction`s.
 
 The schema:
 

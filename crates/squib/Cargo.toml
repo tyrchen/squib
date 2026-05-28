@@ -1,6 +1,6 @@
 [package]
 name = "squib"
-description = "macOS-native microVM monitor with a Firecracker-compatible API"
+description = "Embeddable facade for Squib microVM runtimes"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -15,14 +15,10 @@ workspace = true
 
 [features]
 default = []
-# Enable the bridged-mode codepath in `squib-net`. Pair with the
-# `apps/squib/squib-bridged.entitlements` plist and the `make sign-bridged`
+# Enable the bridged-mode codepath in `squib-net`. Pair CLI builds with the
+# `apps/squib-cli/squib-bridged.entitlements` plist and the `make sign-bridged`
 # target. Per [30-networking.md § 5] and D17.
 bridged = ["squib-net/bridged"]
-
-[[bin]]
-name = "squib"
-path = "src/main.rs"
 
 [dependencies]
 squib-api = { workspace = true }
@@ -35,15 +31,13 @@ squib-hv = { workspace = true }
 squib-legacy = { workspace = true }
 squib-mmds = { workspace = true }
 squib-net = { workspace = true }
-squib-snapshot = { workspace = true }
 squib-virtio = { workspace = true }
 squib-vmm = { workspace = true }
 anyhow = { workspace = true }
-clap = { workspace = true }
 parking_lot = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

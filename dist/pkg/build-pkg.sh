@@ -61,8 +61,8 @@ mkdir -p "$PKG_ROOT/usr/local/libexec/squib"
 
 cp "$SQUIB_BIN" "$PKG_ROOT/usr/local/bin/squib"
 cp "$SQUIB_JAIL_BIN" "$PKG_ROOT/usr/local/bin/squib-jail"
-cp apps/squib/squib.entitlements "$PKG_ROOT/usr/local/share/squib/"
-cp apps/squib/squib-bridged.entitlements "$PKG_ROOT/usr/local/share/squib/"
+cp apps/squib-cli/squib.entitlements "$PKG_ROOT/usr/local/share/squib/"
+cp apps/squib-cli/squib-bridged.entitlements "$PKG_ROOT/usr/local/share/squib/"
 
 # Stage the bundled gvproxy binary if it has been fetched + verified
 # (`make vendor-gvproxy`). The path is prescribed by

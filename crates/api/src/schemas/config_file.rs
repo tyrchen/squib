@@ -19,7 +19,7 @@ use super::{
     vsock::RawVsockConfig,
 };
 
-/// Networking mode squib understands. Mirrors `apps/squib::cli::NetworkMode`.
+/// Networking mode squib understands. Mirrors `apps/squib-cli::cli::NetworkMode`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SquibNetworkMode {

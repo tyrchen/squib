@@ -145,7 +145,7 @@ Per CLAUDE.md § Safety & Security:
 
 - `#![forbid(unsafe_code)]` at the crate root of every crate except `squib-hv` and `squib-net::sys`.
 - No `unwrap()`, `expect()`, `[]` indexing, `unreachable!()`, `todo!()`, `panic!()` reachable from API input. Boundary modules (`squib-api`, the VMM event loop's `ApiAction` dispatch) lint with `clippy::unwrap_used`, `clippy::expect_used`, `clippy::indexing_slicing`, `clippy::panic` denied.
-- Library crates use `thiserror`-derived enum errors with `#[source]`. The CLI (`apps/squib`) uses `anyhow` only at `main.rs`.
+- Library crates use `thiserror`-derived enum errors with `#[source]`. The CLI (`apps/squib-cli`) uses `anyhow` only at `main.rs`.
 - A vCPU thread panic is **fatal to the VM** but not to the process: the VMM event loop catches the `JoinError`, transitions the VM to `Shutdown`, and returns a 500 to any pending API call. Other VMs in the process (if any — see [00-prd.md § 4](./00-prd.md#4-non-goals); we ship single-VM per process for 1.0) are unaffected.
 
 ## 6. Error types

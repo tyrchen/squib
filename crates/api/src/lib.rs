@@ -44,5 +44,5 @@ pub use replay::{ReplayError, parse_config_file, replay_config};
 pub use schemas::{InstanceInfo, VersionResponse, VmState};
 pub use server::{
     DEFAULT_MAX_PAYLOAD, FIRECRACKER_SERVER_HEADER, MAX_MAX_PAYLOAD, MIN_MAX_PAYLOAD, ServeOptions,
-    router, serve, unlink_socket_if_exists,
+    bind_listener, router, serve, serve_bound, unlink_socket_if_exists,
 };

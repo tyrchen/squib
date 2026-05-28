@@ -365,6 +365,20 @@ Each decision is permanent; supersede with a new D-id rather than editing in pla
 
 ---
 
+## D27 — `squib` package name reserved for the embeddable facade
+
+- **Context**: the workspace originally used package `squib` for the CLI-only crate under `apps/squib`. That prevents downstream Rust applications from depending on a natural facade crate named `squib`, and it forces embedders to either shell out to the binary or assemble internal crates directly.
+- **Alternatives considered**:
+  - Keep package `squib` as the CLI and add a differently named facade such as `squib-runtime` (rejected: the most important downstream crate would not have the product name).
+  - Keep all runtime wiring in the CLI and document `squib-api` + `squib-vmm` as the embedding surface (rejected: embedders would duplicate lifecycle, shutdown, network, and vsock wiring).
+  - Rename the CLI package to `squib-cli` while preserving the binary name `squib`, then add `crates/squib` as the facade.
+- **Decision**: package `squib` is the public facade crate under `crates/squib`. The CLI package is `squib-cli`, with `[[bin]] name = "squib"` so operator commands and release artifacts do not change.
+- **Why**: Cargo package names are the embedding API. Reserving the product name for the library makes `use squib::Squib` the obvious integration path while preserving the binary contract users already script against.
+- **Pinned by**: [22-embedding-facade.md](./22-embedding-facade.md), [50-cli.md](./50-cli.md), [61-crates-and-features.md § 2](./61-crates-and-features.md#2-workspace-layout), [91-impl-plan.md § 5.6](./91-impl-plan.md#56-phase-26--embedding-facade).
+- **Date**: 2026-05-28
+
+---
+
 ## Cross-references
 
 - ← Read by: every component spec when justifying a non-obvious choice.

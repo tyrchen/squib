@@ -484,7 +484,7 @@ impl GicRestoreTarget for HvfGicSnapshot {
 /// In-memory MMDS snapshot bridge. squib's MMDS state is fully
 /// portable (no HVF-side data), so the live impl just passes the
 /// caller's stored snapshot through. Production code uses
-/// [`squib_mmds`] handles directly; this is a convenience for the
+/// `squib_mmds` handles directly; this is a convenience for the
 /// tests + boot orchestrator that drive both at once.
 #[derive(Debug, Default)]
 pub struct InProcMmdsSnapshot {

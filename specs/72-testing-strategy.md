@@ -33,7 +33,7 @@ Coverage target: every public function in `squib-core`, `squib-arch`, `squib-fdt
 - `crates/api/tests/` — drive the API server over a UDS, assert wire shapes.
 - `crates/snapshot/tests/` — round-trip save / restore against a real `MicrovmState`.
 - `crates/virtio/tests/` — per-device functional tests against synthetic guests.
-- `apps/squib/tests/` — top-level binary tests via `assert_cmd`, exercising CLI flags and config-file replay.
+- `apps/squib-cli/tests/` — top-level binary tests via `assert_cmd`, exercising CLI flags and config-file replay.
 
 ### 2.3 Compat suite
 

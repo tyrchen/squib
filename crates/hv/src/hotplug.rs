@@ -7,7 +7,7 @@
 //!
 //! - **plug**: `vm.instance().memory_create(len)` allocates a host-side `mmap` region;
 //!   `mem.map(guest_base, MemPerms::RW)` installs the stage-2 mapping. The handle is held in
-//!   [`Self::regions`] so future unplug calls can find it.
+//!   `regions` map so future unplug calls can find it.
 //! - **unplug**: look up the region by `guest_base`, call `mem.unmap()` on the inner
 //!   `applevisor::Memory`, drop the `Arc<Mutex<Memory>>` so the host allocation goes away. The Drop
 //!   impl on `Memory` would call `unmap` again as a safety net, but doing it explicitly surfaces

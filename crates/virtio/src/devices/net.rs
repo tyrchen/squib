@@ -149,7 +149,7 @@ impl FramePool {
         }
     }
 
-    /// Return a buffer to the pool. Buffers beyond [`Self::pool_capacity`]
+    /// Return a buffer to the pool. Buffers beyond `pool_capacity`
     /// are dropped, bounding memory pressure under burst.
     pub fn release(&self, buf: bytes::BytesMut) {
         let mut g = self.free.lock();

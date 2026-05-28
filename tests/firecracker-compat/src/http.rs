@@ -3,7 +3,7 @@
 //! Built directly on `tokio::net::UnixStream` + `httparse` so the bytes on the wire
 //! are exactly what an SDK / `firectl` would observe — no client-library massaging.
 
-use std::{fmt::Write as _, path::Path, time::Duration};
+use std::{fmt::Write as _, io::ErrorKind, path::Path, time::Duration};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -58,17 +58,19 @@ pub async fn http_request(socket: &Path, raw_request: &str) -> HttpResponse {
         // Servers may hang up early (413 bodies, oversized headers). The response
         // shape is still in the read half — fall through to read it.
         match err.kind() {
-            std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::UnexpectedEof => {}
+            ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof => {}
             _ => panic!("write request: {err}"),
         }
     }
     let mut buf = Vec::with_capacity(2048);
-    timeout(Duration::from_secs(5), stream.read_to_end(&mut buf))
+    match timeout(Duration::from_secs(5), stream.read_to_end(&mut buf))
         .await
         .expect("response read timed out")
-        .expect("response read");
+    {
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::ConnectionReset && !buf.is_empty() => {}
+        Err(err) => panic!("response read: {err}"),
+    }
     parse_response(&buf)
 }
 
